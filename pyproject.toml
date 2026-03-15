@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "megamek-gym"
+version = "0.1.0"
+description = "Gymnasium environment for MegaMek RL training"
+authors = []
+packages = [{include = "megamek_gym"}]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+gymnasium = ">=0.29"
+numpy = ">=1.24"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+
+[tool.poetry.plugins."gymnasium.envs"]
+__root__ = "megamek_gym:register_envs"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
