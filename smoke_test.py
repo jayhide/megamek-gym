@@ -61,6 +61,20 @@ def main():
     if args.port is not None:
         config.rl_port = args.port
 
+    print("Configuration:")
+    print(f"  RL unit:       {config.rl_unit}")
+    print(f"  Opponent unit: {config.opponent_unit}")
+    print(f"  Board:         {config.board} ({config.resolved_board_width}x{config.resolved_board_height})")
+    print(f"  Port:          {config.rl_port}")
+    print(f"  Timeout:       {config.java_timeout_minutes} min")
+    print(f"  Max moves:     {config.max_legal_moves}")
+    print(f"  RL start pos:  {config.rl_starting_pos}")
+    print(f"  Opp start pos: {config.opponent_starting_pos}")
+    print(f"  RL deployment: {config.rl_deployment}")
+    print(f"  Firing:        {config.firing_strategy}")
+    if args.config:
+        print(f"  (loaded from {args.config})")
+
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
 
     for ep in range(args.episodes):
