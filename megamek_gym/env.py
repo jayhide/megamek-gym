@@ -37,6 +37,9 @@ class MegaMekEnv(gymnasium.Env):
         reward_fn: RewardFunction | None = None,
         max_rotating_round_saves: int = 100,
         paranoid_autosave: bool = False,
+        rl_starting_pos: int = 2,
+        opponent_starting_pos: int = 6,
+        rl_deployment: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -53,6 +56,9 @@ class MegaMekEnv(gymnasium.Env):
         self.max_legal_moves = max_legal_moves
         self.max_rotating_round_saves = max_rotating_round_saves
         self.paranoid_autosave = paranoid_autosave
+        self.rl_starting_pos = rl_starting_pos
+        self.opponent_starting_pos = opponent_starting_pos
+        self.rl_deployment = rl_deployment
 
         self.reward_fn = reward_fn or CompositeReward()
 
@@ -88,6 +94,9 @@ class MegaMekEnv(gymnasium.Env):
             timeout_minutes=self.java_timeout_minutes,
             max_rotating_round_saves=self.max_rotating_round_saves,
             paranoid_autosave=self.paranoid_autosave,
+            rl_starting_pos=self.rl_starting_pos,
+            opponent_starting_pos=self.opponent_starting_pos,
+            rl_deployment=self.rl_deployment,
         )
         self._java.start()
 

@@ -48,9 +48,9 @@ This project requires a sibling checkout of the [megamek](https://github.com/Meg
 
 **Gradle task** in `megamek/build.gradle` (~line 596):
 ```
-./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout"
+./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment"
 ```
-Launches `RLGameRunner.main()` with pipe-delimited arguments.
+Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
 **Documentation**: `docs/rl-python-side.md` in the megamek repo contains the original task spec for this Python environment.
 

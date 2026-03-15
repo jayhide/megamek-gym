@@ -19,6 +19,9 @@ class JavaProcess:
         timeout_minutes: int,
         max_rotating_round_saves: int = 100,
         paranoid_autosave: bool = False,
+        rl_starting_pos: int = 2,
+        opponent_starting_pos: int = 6,
+        rl_deployment: bool = False,
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -28,6 +31,9 @@ class JavaProcess:
         self.timeout_minutes = timeout_minutes
         self.max_rotating_round_saves = max_rotating_round_saves
         self.paranoid_autosave = paranoid_autosave
+        self.rl_starting_pos = rl_starting_pos
+        self.opponent_starting_pos = opponent_starting_pos
+        self.rl_deployment = rl_deployment
         self._process: subprocess.Popen | None = None
 
     def start(self) -> None:
@@ -39,6 +45,9 @@ class JavaProcess:
             str(self.timeout_minutes),
             str(self.max_rotating_round_saves),
             str(self.paranoid_autosave).lower(),
+            str(self.rl_starting_pos),
+            str(self.opponent_starting_pos),
+            str(self.rl_deployment).lower(),
         ])
         cmd = [
             "./gradlew",
