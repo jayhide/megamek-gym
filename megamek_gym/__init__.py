@@ -1,5 +1,7 @@
 from gymnasium.envs.registration import register
 
+from megamek_gym.config import MegaMekConfig  # noqa: F401
+
 
 def register_envs():
     pass

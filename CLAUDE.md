@@ -25,7 +25,7 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
         └── Sends action index                                  └── Translates index → MovePath
 ```
 
-- **Observation space**: `Box(shape=(380,), float32)` — board elevations (272) + RL unit state (54) + enemy unit state (54)
+- **Observation space**: `Box(shape=(W*H + 108,), float32)` — board elevations (W*H) + RL unit state (54) + enemy unit state (54). Default board (16x17) gives 380.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
 - **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + 10x WinLoss)
 
@@ -67,17 +67,50 @@ Newline-delimited JSON over TCP (default port 9999):
 ```
 megamek_gym/
 ├── __init__.py          # Gymnasium env registration (MegaMekGym/MegaMek-v0)
+├── config.py            # MegaMekConfig dataclass with YAML save/load
 ├── env.py               # MegaMekEnv — full Gymnasium.Env implementation
 ├── java_process.py      # JavaProcess — subprocess wrapper for Gradle launcher
-├── observation.py       # Flattens variable JSON observations → fixed 380-float array
+├── observation.py       # Flattens variable JSON observations → fixed float array
 └── reward.py            # RewardFunction base class + DamageDelta, WinLoss, Composite
 
+configs/
+└── default.yaml         # Default configuration (all params documented)
+
 tests/
+├── test_config.py       # Config parsing, validation, and YAML roundtrip tests
 ├── test_observation.py  # Observation flattening correctness tests
 └── test_reward.py       # Reward function logic tests
 
 smoke_test.py            # End-to-end integration test with live Java process
 ```
+
+## Configuration
+
+Game parameters are managed via `MegaMekConfig` (a dataclass in `megamek_gym/config.py`). Configs can be saved/loaded as YAML for experiment reproducibility.
+
+```python
+from megamek_gym import MegaMekConfig
+
+# Defaults
+cfg = MegaMekConfig()
+
+# Custom
+cfg = MegaMekConfig(rl_unit="Locust LCT-1V", rl_port=10000)
+
+# Save/load YAML
+cfg.save("configs/my_experiment.yaml")
+cfg = MegaMekConfig.load("configs/my_experiment.yaml")
+
+# Use with gymnasium
+env = gymnasium.make("MegaMekGym/MegaMek-v0", config=cfg)
+
+# Or pass kwargs directly (backward compatible)
+env = gymnasium.make("MegaMekGym/MegaMek-v0", rl_unit="Locust LCT-1V")
+```
+
+Board dimensions are auto-derived from the board name (e.g., `"16x17"` in `"Map Set 6/16x17 BattleForce 2"`). For boards without parseable dimensions, set `board_width` and `board_height` explicitly.
+
+The `smoke_test.py` accepts `--config path/to/config.yaml` with optional `--megamek-dir` and `--port` overrides.
 
 ## Development Notes
 

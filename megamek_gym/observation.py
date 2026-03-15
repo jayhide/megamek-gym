@@ -10,6 +10,11 @@ BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
 UNIT_FEATURES = 54
 OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES  # 380
 
+
+def compute_obs_size(board_width: int, board_height: int) -> int:
+    """Compute observation vector size for a given board."""
+    return board_width * board_height + 2 * UNIT_FEATURES
+
 MAX_ARMOR_LOCATIONS = 8
 MAX_WEAPONS = 7
 
@@ -24,7 +29,8 @@ def flatten_observation(
 
     Returns shape (380,) array with values in [-1, 1].
     """
-    result = np.zeros(OBS_SIZE, dtype=np.float32)
+    obs_size = compute_obs_size(board_width, board_height)
+    result = np.zeros(obs_size, dtype=np.float32)
 
     # Board block: elevation per hex, row-major, normalized by /10
     board = obs.get("board", {})

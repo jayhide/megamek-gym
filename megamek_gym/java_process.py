@@ -22,6 +22,7 @@ class JavaProcess:
         rl_starting_pos: int = 2,
         opponent_starting_pos: int = 6,
         rl_deployment: bool = False,
+        firing_strategy: str = "princess",
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -34,6 +35,7 @@ class JavaProcess:
         self.rl_starting_pos = rl_starting_pos
         self.opponent_starting_pos = opponent_starting_pos
         self.rl_deployment = rl_deployment
+        self.firing_strategy = firing_strategy
         self._process: subprocess.Popen | None = None
 
     def start(self) -> None:
@@ -48,6 +50,7 @@ class JavaProcess:
             str(self.rl_starting_pos),
             str(self.opponent_starting_pos),
             str(self.rl_deployment).lower(),
+            self.firing_strategy,
         ])
         cmd = [
             "./gradlew",

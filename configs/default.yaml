@@ -1,0 +1,13 @@
+megamek_dir: ../megamek
+rl_unit: Firestarter FS9-H
+opponent_unit: Commando COM-2D
+board: Map Set 6/16x17 BattleForce 2
+rl_port: 9999
+env_index: 0
+java_timeout_minutes: 10
+max_legal_moves: 1000
+max_rotating_round_saves: 100
+paranoid_autosave: false
+rl_starting_pos: 2
+opponent_starting_pos: 6
+rl_deployment: false

@@ -10,9 +10,10 @@ import gymnasium
 import numpy as np
 from gymnasium import spaces
 
+from megamek_gym.config import MegaMekConfig
 from megamek_gym.java_process import JavaProcess
 from megamek_gym.observation import (
-    OBS_SIZE,
+    compute_obs_size,
     flatten_observation,
     identify_rl_owner,
 )
@@ -24,48 +25,31 @@ class MegaMekEnv(gymnasium.Env):
 
     def __init__(
         self,
-        megamek_dir: str = "../megamek",
-        rl_unit: str = "Firestarter FS9-H",
-        opponent_unit: str = "Commando COM-2D",
-        board: str = "Map Set 6/16x17 BattleForce 2",
-        board_width: int = 16,
-        board_height: int = 17,
-        rl_port: int = 9999,
-        env_index: int = 0,
-        java_timeout_minutes: int = 10,
-        max_legal_moves: int = 1000,
+        config: MegaMekConfig | None = None,
         reward_fn: RewardFunction | None = None,
-        max_rotating_round_saves: int = 100,
-        paranoid_autosave: bool = False,
-        rl_starting_pos: int = 2,
-        opponent_starting_pos: int = 6,
-        rl_deployment: bool = False,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        if config is not None and kwargs:
+            raise ValueError(
+                "Pass either config or keyword arguments, not both"
+            )
 
-        self.megamek_dir = megamek_dir
-        self.rl_unit = rl_unit
-        self.opponent_unit = opponent_unit
-        self.board = board
-        self.board_width = board_width
-        self.board_height = board_height
-        self.rl_port = rl_port
-        self.env_index = env_index
-        self.java_timeout_minutes = java_timeout_minutes
-        self.max_legal_moves = max_legal_moves
-        self.max_rotating_round_saves = max_rotating_round_saves
-        self.paranoid_autosave = paranoid_autosave
-        self.rl_starting_pos = rl_starting_pos
-        self.opponent_starting_pos = opponent_starting_pos
-        self.rl_deployment = rl_deployment
+        if config is None:
+            config = MegaMekConfig(**kwargs)
 
+        # Pop gymnasium's render_mode before it reaches super().__init__
+        super().__init__()
+
+        self.config = config
         self.reward_fn = reward_fn or CompositeReward()
 
-        self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(OBS_SIZE,), dtype=np.float32
+        obs_size = compute_obs_size(
+            config.resolved_board_width, config.resolved_board_height
         )
-        self.action_space = spaces.Discrete(max_legal_moves)
+        self.observation_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(obs_size,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(config.max_legal_moves)
 
         self._java: JavaProcess | None = None
         self._sock: socket.socket | None = None
@@ -77,26 +61,29 @@ class MegaMekEnv(gymnasium.Env):
 
     @property
     def _port(self) -> int:
-        return self.rl_port + self.env_index
+        return self.config.rl_port + self.config.env_index
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
         self._cleanup()
 
+        cfg = self.config
+
         # Start Java
         self._java = JavaProcess(
-            megamek_dir=self.megamek_dir,
-            rl_unit=self.rl_unit,
-            opponent_unit=self.opponent_unit,
-            board=self.board,
+            megamek_dir=cfg.megamek_dir,
+            rl_unit=cfg.rl_unit,
+            opponent_unit=cfg.opponent_unit,
+            board=cfg.board,
             port=self._port,
-            timeout_minutes=self.java_timeout_minutes,
-            max_rotating_round_saves=self.max_rotating_round_saves,
-            paranoid_autosave=self.paranoid_autosave,
-            rl_starting_pos=self.rl_starting_pos,
-            opponent_starting_pos=self.opponent_starting_pos,
-            rl_deployment=self.rl_deployment,
+            timeout_minutes=cfg.java_timeout_minutes,
+            max_rotating_round_saves=cfg.max_rotating_round_saves,
+            paranoid_autosave=cfg.paranoid_autosave,
+            rl_starting_pos=cfg.rl_starting_pos,
+            opponent_starting_pos=cfg.opponent_starting_pos,
+            rl_deployment=cfg.rl_deployment,
+            firing_strategy=cfg.firing_strategy,
         )
         self._java.start()
 
@@ -133,7 +120,8 @@ class MegaMekEnv(gymnasium.Env):
         self._last_raw_obs = raw_obs
         self._legal_moves = raw_obs.get("legal_moves", [])
         flat = flatten_observation(
-            raw_obs, self._rl_owner_id, self.board_width, self.board_height
+            raw_obs, self._rl_owner_id,
+            cfg.resolved_board_width, cfg.resolved_board_height,
         )
         self._last_flat_obs = flat
 
@@ -156,7 +144,9 @@ class MegaMekEnv(gymnasium.Env):
             flat = self._last_flat_obs
         else:
             flat = flatten_observation(
-                raw_obs, self._rl_owner_id, self.board_width, self.board_height
+                raw_obs, self._rl_owner_id,
+                self.config.resolved_board_width,
+                self.config.resolved_board_height,
             )
             self._last_flat_obs = flat
 
@@ -184,7 +174,7 @@ class MegaMekEnv(gymnasium.Env):
         }
 
     def action_masks(self) -> np.ndarray:
-        mask = np.zeros(self.max_legal_moves, dtype=bool)
+        mask = np.zeros(self.config.max_legal_moves, dtype=bool)
         n = len(self._legal_moves)
         if n > 0:
             mask[:n] = True

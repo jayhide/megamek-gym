@@ -2,7 +2,7 @@
 """Smoke test: run random episodes through the MegaMekEnv.
 
 Usage:
-    python smoke_test.py [--episodes N] [--megamek-dir PATH]
+    python smoke_test.py [--episodes N] [--megamek-dir PATH] [--config PATH]
 """
 
 import argparse
@@ -12,6 +12,7 @@ import gymnasium  # noqa: F401 — triggers env registration
 import numpy as np
 
 import megamek_gym  # noqa: F401 — registers MegaMekGym/MegaMek-v0
+from megamek_gym.config import MegaMekConfig
 
 
 def _unit_summary(unit: dict | None, label: str) -> str:
@@ -43,15 +44,24 @@ def _unit_summary(unit: dict | None, label: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="MegaMek-Gym smoke test")
     parser.add_argument("--episodes", type=int, default=1)
-    parser.add_argument("--megamek-dir", type=str, default="../megamek")
-    parser.add_argument("--port", type=int, default=9999)
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML config file")
+    parser.add_argument("--megamek-dir", type=str, default=None)
+    parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
 
-    env = gymnasium.make(
-        "MegaMekGym/MegaMek-v0",
-        megamek_dir=args.megamek_dir,
-        rl_port=args.port,
-    )
+    if args.config:
+        config = MegaMekConfig.load(args.config)
+    else:
+        config = MegaMekConfig()
+
+    # Apply CLI overrides
+    if args.megamek_dir is not None:
+        config.megamek_dir = args.megamek_dir
+    if args.port is not None:
+        config.rl_port = args.port
+
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
 
     for ep in range(args.episodes):
         print(f"\n{'='*70}")
