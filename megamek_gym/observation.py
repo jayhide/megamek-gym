@@ -7,8 +7,8 @@ import numpy as np
 BOARD_WIDTH = 16
 BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
-UNIT_FEATURES = 54
-OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES  # 380
+UNIT_FEATURES = 55
+OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES  # 382
 
 
 def compute_obs_size(board_width: int, board_height: int) -> int:
@@ -27,7 +27,7 @@ def flatten_observation(
 ) -> np.ndarray:
     """Flatten a JSON observation dict into a fixed-size float32 array.
 
-    Returns shape (380,) array with values in [-1, 1].
+    Returns shape (382,) array with values in [-1, 1].
     """
     obs_size = compute_obs_size(board_width, board_height)
     result = np.zeros(obs_size, dtype=np.float32)
@@ -98,7 +98,8 @@ def _encode_unit(
     buf[i] = float(unit.get("prone", False))
     buf[i + 1] = float(unit.get("destroyed", False))
     buf[i + 2] = float(unit.get("deployed", False))
-    i += 3
+    buf[i + 3] = float(unit.get("retreated", False))
+    i += 4
 
     # Armor locations (8 max, 4 values each)
     armor_locs = unit.get("armor", [])

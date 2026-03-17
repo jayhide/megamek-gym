@@ -130,11 +130,12 @@ class TestFlattenObservation:
         assert flat[offset] == 0.0  # not prone
         assert flat[offset + 1] == 0.0  # not destroyed
         assert flat[offset + 2] == 1.0  # deployed
+        assert flat[offset + 3] == 0.0  # not retreated
 
     def test_armor_ratios(self):
         obs = _make_obs()
         flat = flatten_observation(obs, rl_owner_id=0)
-        offset = BOARD_SIZE + 15  # pos + facing + mp + heat + status
+        offset = BOARD_SIZE + 16  # pos(2) + facing(6) + mp(3) + heat(1) + status(4)
         # CT: armor 20/30, internal 10/15, rear 8/10, not destroyed
         assert flat[offset] == pytest.approx(20 / 30)
         assert flat[offset + 1] == pytest.approx(10 / 15)
@@ -144,7 +145,7 @@ class TestFlattenObservation:
     def test_weapon_destroyed_flags(self):
         obs = _make_obs()
         flat = flatten_observation(obs, rl_owner_id=0)
-        offset = BOARD_SIZE + 15 + 32  # after armor (8 locs × 4)
+        offset = BOARD_SIZE + 16 + 32  # after armor (8 locs × 4)
         assert flat[offset] == 0.0  # Medium Laser not destroyed
         assert flat[offset + 1] == 1.0  # SRM 4 destroyed
         assert flat[offset + 2] == 0.0  # padded

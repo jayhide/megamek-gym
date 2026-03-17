@@ -6,7 +6,8 @@ from megamek_gym.reward import CompositeReward, DamageDeltaReward, WinLossReward
 
 
 def _make_obs(rl_armor=20, rl_internal=10, enemy_armor=15, enemy_internal=8,
-              rl_destroyed=False, enemy_destroyed=False, terminated=False):
+              rl_destroyed=False, enemy_destroyed=False,
+              rl_retreated=False, enemy_retreated=False, terminated=False):
     return {
         "terminated": terminated,
         "units": [
@@ -14,6 +15,7 @@ def _make_obs(rl_armor=20, rl_internal=10, enemy_armor=15, enemy_internal=8,
                 "id": 1,
                 "owner": 0,
                 "destroyed": rl_destroyed,
+                "retreated": rl_retreated,
                 "armor": [
                     {"armor": rl_armor, "armor_max": 30,
                      "internal": rl_internal, "internal_max": 15,
@@ -24,6 +26,7 @@ def _make_obs(rl_armor=20, rl_internal=10, enemy_armor=15, enemy_internal=8,
                 "id": 2,
                 "owner": 1,
                 "destroyed": enemy_destroyed,
+                "retreated": enemy_retreated,
                 "armor": [
                     {"armor": enemy_armor, "armor_max": 20,
                      "internal": enemy_internal, "internal_max": 10,
@@ -111,6 +114,27 @@ class TestWinLossReward:
         prev = _make_obs(enemy_destroyed=True)
         terminal = {"terminated": True, "units": []}
         assert r.compute(prev, terminal, True) == 1.0
+
+    def test_enemy_retreated_is_win(self):
+        r = WinLossReward(scale=10.0)
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_obs(enemy_retreated=True)
+        assert r.compute({}, obs, True) == 10.0
+
+    def test_own_retreated_is_loss(self):
+        r = WinLossReward(scale=10.0)
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_obs(rl_retreated=True)
+        assert r.compute({}, obs, True) == -10.0
+
+    def test_both_retreated_is_draw(self):
+        r = WinLossReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_obs(rl_retreated=True, enemy_retreated=True)
+        assert r.compute({}, obs, True) == 0.0
 
 
 class TestCompositeReward:

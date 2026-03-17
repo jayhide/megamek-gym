@@ -95,11 +95,11 @@ class WinLossReward(RewardFunction):
             units = prev_obs.get("units", [])
 
         own_alive = any(
-            not u.get("destroyed", False)
+            not u.get("destroyed", False) and not u.get("retreated", False)
             for u in units if u["owner"] == self._rl_owner
         )
         enemy_alive = any(
-            not u.get("destroyed", False)
+            not u.get("destroyed", False) and not u.get("retreated", False)
             for u in units if u["owner"] != self._rl_owner
         )
 

@@ -20,12 +20,12 @@ The environment launches a Java subprocess (MegaMek game engine) via Gradle and 
 Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient in MegaMek)
         │                                                       │
         ├── Receives observation JSON                           ├── Enumerates legal moves
-        ├── Flattens to 380-float vector                        ├── Builds JSON observation
+        ├── Flattens to 382-float vector                        ├── Builds JSON observation
         ├── Computes reward (Python-side)                       ├── Sends obs to Python
         └── Sends action index                                  └── Translates index → MovePath
 ```
 
-- **Observation space**: `Box(shape=(W*H + 108,), float32)` — board elevations (W*H) + RL unit state (54) + enemy unit state (54). Default board (16x17) gives 380.
+- **Observation space**: `Box(shape=(W*H + 110,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55). Default board (16x17) gives 382.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
 - **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + 10x WinLoss)
 
