@@ -31,7 +31,9 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
 
 ## Dependencies on `../megamek` Repo
 
-This project requires a sibling checkout of the [megamek](https://github.com/MegaMek/megamek) repo with RL bridge files added. The Java side lives at:
+This project requires a sibling checkout of the [megamek](https://github.com/MegaMek/megamek) repo with RL bridge files added. When the Java implementation is relevant to the issue (e.g., debugging protocol errors, changing observations/actions/rewards), read the corresponding Java-side code in `../megamek/src/megamek/client/bot/rl/`. Start with `../megamek/src/megamek/client/bot/rl/CLAUDE.md` for Java-side architecture and known limitations.
+
+The Java side lives at:
 
 **`megamek/src/megamek/client/bot/rl/`**
 
@@ -161,3 +163,16 @@ runs/{exp_name}__{seed}__{timestamp}/
 - **Reward shaping** is done in Python (not Java) so you can iterate without recompiling
 - Parallel training uses per-environment port offsets: `port = rl_port + env_index`
 - The opponent is MegaMek's built-in Princess AI
+
+## Debugging Java Errors
+
+Each Java subprocess writes its stderr to a log file at `{megamek_dir}/rl_java_{port}.log`. With the default port (9999) and 4 training envs, the logs are:
+
+```
+../megamek/rl_java_9999.log   # env 0
+../megamek/rl_java_10000.log  # env 1
+../megamek/rl_java_10001.log  # env 2
+../megamek/rl_java_10002.log  # env 3
+```
+
+When you see `ConnectionError: Java process closed the connection`, the Java-side error (stack trace, OOM, etc.) will be in these log files. Check the log for the port mentioned in the error. The logging is set up in `megamek_gym/java_process.py`.

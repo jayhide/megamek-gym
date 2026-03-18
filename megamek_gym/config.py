@@ -31,8 +31,9 @@ class MegaMekConfig:
     env_index: int = 0
     java_timeout_minutes: int = 10
     max_legal_moves: int = 1000
-    max_rotating_round_saves: int = 100
+    max_rotating_round_saves: int = 5000
     paranoid_autosave: bool = False
+    save_budget_mb: int = 1000
     rl_starting_pos: int = 2
     opponent_starting_pos: int = 6
     rl_deployment: bool = False

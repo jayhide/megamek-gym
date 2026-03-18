@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -54,6 +56,7 @@ class JavaProcess:
         ])
         cmd = [
             "./gradlew",
+            "--no-daemon",
             ":megamek:runRLGameRunner",
             f"-PrlArgs={rl_args}",
         ]
@@ -63,16 +66,25 @@ class JavaProcess:
             cwd=self.megamek_dir,
             stdout=subprocess.DEVNULL,
             stderr=self._stderr_file,
+            start_new_session=True,
         )
 
     def stop(self) -> None:
         if self._process is None:
             return
-        self._process.terminate()
+        # Kill the entire process group (Gradle + JVM) so no orphans remain
+        pgid = os.getpgid(self._process.pid)
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # Already dead
         try:
             self._process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self._process.kill()
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             self._process.wait()
         self._process = None
         if self._stderr_file is not None:

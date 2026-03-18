@@ -6,8 +6,9 @@ rl_port: 9999
 env_index: 0
 java_timeout_minutes: 10
 max_legal_moves: 1000
-max_rotating_round_saves: 100
+max_rotating_round_saves: 5000
 paranoid_autosave: false
+save_budget_mb: 1000
 rl_starting_pos: 2
 opponent_starting_pos: 6
 rl_deployment: false

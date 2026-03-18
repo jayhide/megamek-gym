@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import time
+from pathlib import Path
 
 import gymnasium
 import numpy as np
@@ -63,9 +64,39 @@ class MegaMekEnv(gymnasium.Env):
     def _port(self) -> int:
         return self.config.rl_port + self.config.env_index
 
+    def _cleanup_saves(self):
+        """Delete autosave_* files (not needed for replay, which uses Round-* files).
+        Also enforce save_budget_mb by deleting oldest Round-* files if over budget."""
+        savegames_dir = Path(self.config.megamek_dir) / "megamek" / "savegames"
+        if not savegames_dir.is_dir():
+            return
+
+        # Remove autosave_* files (written at VICTORY, not used by replay UI)
+        for f in savegames_dir.glob("autosave_*.sav.gz"):
+            try:
+                f.unlink()
+            except OSError:
+                pass  # Another env may have already deleted it
+
+        # Enforce save budget on Round-* files
+        budget_bytes = self.config.save_budget_mb * 1024 * 1024
+        round_files = sorted(
+            savegames_dir.glob("Round-*.sav.gz"),
+            key=lambda f: f.stat().st_mtime,
+        )
+        total = sum(f.stat().st_size for f in round_files)
+        while total > budget_bytes and round_files:
+            oldest = round_files.pop(0)
+            try:
+                total -= oldest.stat().st_size
+                oldest.unlink()
+            except OSError:
+                pass
+
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
+        self._cleanup_saves()
         self._cleanup()
 
         cfg = self.config
@@ -105,6 +136,7 @@ class MegaMekEnv(gymnasium.Env):
                 f"Could not connect to Java on port {self._port} after 60s"
             )
 
+        self._sock.settimeout(360)  # 6 min — longer than Java's 5-min socket timeout
         self._reader = self._sock.makefile("r", encoding="utf-8")
 
         # Read first observation
@@ -184,6 +216,9 @@ class MegaMekEnv(gymnasium.Env):
     def close(self):
         self._cleanup()
 
+    def __del__(self):
+        self._cleanup()
+
     def _cleanup(self):
         if self._reader is not None:
             try:
@@ -202,7 +237,20 @@ class MegaMekEnv(gymnasium.Env):
             self._java = None
 
     def _read_obs(self) -> dict:
-        line = self._reader.readline()
+        try:
+            line = self._reader.readline()
+        except socket.timeout:
+            alive = self._java.is_alive() if self._java else False
+            status = "running" if alive else "dead"
+            raise ConnectionError(
+                f"Timed out waiting for Java observation (Java process is {status}). "
+                f"Check {self.config.megamek_dir}/rl_java_{self._port}.log"
+            )
         if not line:
-            raise ConnectionError("Java process closed the connection")
+            alive = self._java.is_alive() if self._java else False
+            status = "running" if alive else "dead"
+            raise ConnectionError(
+                f"Java process closed the connection (process is {status}). "
+                f"Check {self.config.megamek_dir}/rl_java_{self._port}.log"
+            )
         return json.loads(line)
