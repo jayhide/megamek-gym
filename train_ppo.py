@@ -15,6 +15,13 @@ from torch.utils.tensorboard import SummaryWriter
 from megamek_gym.config import MegaMekConfig
 
 
+def fmt_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def make_env(env_index, args):
     # Resolve megamek_dir to absolute path before entering the subprocess,
     # since AsyncVectorEnv may change the working directory.
@@ -106,7 +113,6 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    print(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -158,6 +164,17 @@ if __name__ == "__main__":
     next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
     num_updates = args.total_timesteps // args.batch_size
 
+    print(f"\n{'='*60}")
+    print(f"  PPO Training — {args.exp_name}")
+    print(f"  Device: {device} | Envs: {args.num_envs}")
+    print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n}")
+    print(f"  Timesteps: {args.total_timesteps:,} | Updates: {num_updates}")
+    print(f"  Batch: {args.batch_size} | Minibatch: {args.minibatch_size}")
+    print(f"  LR: {args.learning_rate} | Ent: {args.ent_coef} | Gamma: {args.gamma}")
+    print(f"{'='*60}\n")
+
+    recent_returns = []
+
     for update in range(start_update, num_updates + 1):
 
         if args.anneal_lr:
@@ -188,8 +205,10 @@ if __name__ == "__main__":
             if "final_info" in info:
                 for i, fi in enumerate(info["final_info"]):
                     if fi is not None and "episode" in fi:
-                        print(f"global_step={global_step}, episodic_return={fi['episode']['r']:.2f}")
-                        writer.add_scalar("charts/episodic_return", fi["episode"]["r"], global_step)
+                        ep_return = fi["episode"]["r"]
+                        recent_returns.append(ep_return)
+                        print(f"  episode done: return={ep_return:.2f}, len={fi['episode']['l']}")
+                        writer.add_scalar("charts/episodic_return", ep_return, global_step)
                         writer.add_scalar("charts/episodic_length", fi["episode"]["l"], global_step)
 
         # GAE
@@ -282,7 +301,18 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print(f"update={update}, SPS={int(global_step / (time.time() - start_time))}")
+
+        elapsed = time.time() - start_time
+        sps = int(global_step / elapsed)
+        updates_done = update - start_update + 1
+        eta_seconds = elapsed / updates_done * (num_updates - update)
+        pct = 100.0 * update / num_updates
+        print(
+            f"[update {update}/{num_updates} | {pct:.1f}% | ETA {fmt_time(eta_seconds)}]"
+            f" SPS={sps}"
+            f" | pg={pg_loss.item():.4f} vf={v_loss.item():.4f} ent={entropy_loss.item():.3f}"
+            f" | kl={approx_kl.item():.4f} clip={np.mean(clipfracs):.3f}"
+        )
 
         # Checkpointing
         if update % args.save_interval == 0:
@@ -296,6 +326,23 @@ if __name__ == "__main__":
             }
             torch.save(checkpoint, f"runs/{run_name}/checkpoints/step_{global_step}.pt")
             torch.save(checkpoint, f"runs/{run_name}/checkpoints/latest.pt")
+
+            elapsed = time.time() - start_time
+            summary_start = max(start_update, update - args.save_interval + 1)
+            print(f"\n--- Summary (updates {summary_start}-{update}) ---")
+            if recent_returns:
+                print(f"  Mean episodic return: {np.mean(recent_returns):.2f} ({len(recent_returns)} episodes)")
+            else:
+                print(f"  Mean episodic return: N/A (0 episodes)")
+            print(f"  Explained variance:  {explained_var:.4f}")
+            print(f"  Learning rate:       {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"  Elapsed:             {fmt_time(elapsed)}")
+            print()
+            recent_returns.clear()
+
+    elapsed = time.time() - start_time
+    sps = int(global_step / elapsed) if elapsed > 0 else 0
+    print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
 
     writer.close()
     envs.close()
