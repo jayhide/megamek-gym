@@ -10,6 +10,8 @@ python = ">=3.10,<3.13"
 gymnasium = ">=0.29"
 numpy = ">=1.24"
 pyyaml = ">=6.0"
+torch = ">=2.0"
+tensorboard = ">=2.14"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.0"

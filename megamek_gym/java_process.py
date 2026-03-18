@@ -57,11 +57,12 @@ class JavaProcess:
             ":megamek:runRLGameRunner",
             f"-PrlArgs={rl_args}",
         ]
+        self._stderr_file = open(self.megamek_dir / f"rl_java_{self.port}.log", "w")
         self._process = subprocess.Popen(
             cmd,
             cwd=self.megamek_dir,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=self._stderr_file,
         )
 
     def stop(self) -> None:
@@ -74,6 +75,9 @@ class JavaProcess:
             self._process.kill()
             self._process.wait()
         self._process = None
+        if self._stderr_file is not None:
+            self._stderr_file.close()
+            self._stderr_file = None
 
     def is_alive(self) -> bool:
         return self._process is not None and self._process.poll() is None

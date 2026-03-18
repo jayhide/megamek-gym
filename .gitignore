@@ -17,3 +17,6 @@ dist/
 
 # Secrets
 .env
+
+# Training runs (TensorBoard logs, checkpoints)
+runs/

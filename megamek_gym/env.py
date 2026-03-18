@@ -167,6 +167,7 @@ class MegaMekEnv(gymnasium.Env):
                 enemy_unit = u
         return {
             "legal_moves": self._legal_moves,
+            "action_mask": self.action_masks(),
             "round": raw_obs.get("round", 0),
             "phase": raw_obs.get("phase", ""),
             "rl_unit": rl_unit,

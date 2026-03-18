@@ -82,6 +82,8 @@ tests/
 └── test_reward.py       # Reward function logic tests
 
 smoke_test.py            # End-to-end integration test with live Java process
+train_ppo.py             # CleanRL-style PPO training script
+eval.py                  # Evaluation script for trained checkpoints
 ```
 
 ## Configuration
@@ -111,6 +113,47 @@ env = gymnasium.make("MegaMekGym/MegaMek-v0", rl_unit="Locust LCT-1V")
 Board dimensions are auto-derived from the board name (e.g., `"16x17"` in `"Map Set 6/16x17 BattleForce 2"`). For boards without parseable dimensions, set `board_width` and `board_height` explicitly.
 
 The `smoke_test.py` accepts `--config path/to/config.yaml` with optional `--megamek-dir` and `--port` overrides.
+
+## Training
+
+CleanRL-style PPO with action masking. Uses `AsyncVectorEnv` for parallel environments (each env spawns its own JVM).
+
+```bash
+# Basic training run
+poetry run python train_ppo.py --megamek-dir ../megamek
+
+# Fewer envs, shorter run (smoke test)
+poetry run python train_ppo.py --megamek-dir ../megamek --num-envs 1 --total-timesteps 500 --num-steps 64
+
+# Resume from checkpoint
+poetry run python train_ppo.py --megamek-dir ../megamek --resume runs/megamek-ppo__1__*/checkpoints/latest.pt
+
+# View metrics
+tensorboard --logdir runs/
+```
+
+**Evaluation:**
+```bash
+poetry run python eval.py --checkpoint runs/megamek-ppo__1__*/checkpoints/latest.pt --num-episodes 10
+poetry run python eval.py --checkpoint path/to/checkpoint.pt --deterministic  # greedy policy
+```
+
+**Run directory structure:**
+```
+runs/{exp_name}__{seed}__{timestamp}/
+├── events.out.tfevents.*           # TensorBoard logs
+└── checkpoints/
+    ├── step_NNNNN.pt               # Periodic checkpoints
+    └── latest.pt                   # Most recent checkpoint
+```
+
+**Key hyperparameters to tune:**
+- `--ent-coef` (default 0.01) — entropy bonus; increase if agent converges to a bad policy too quickly
+- `--num-envs` (default 4) — more envs = more data per update, but more JVM processes
+- `--num-steps` (default 128) — rollout length; longer = better advantage estimates but more memory
+- `--learning-rate` (default 3e-4) — with `--anneal-lr` enabled by default
+
+**Dependencies:** `torch`, `tensorboard` (added to pyproject.toml alongside gymnasium/numpy/pyyaml)
 
 ## Development Notes
 
