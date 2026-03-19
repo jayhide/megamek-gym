@@ -213,6 +213,7 @@ if __name__ == "__main__":
         recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
         recent_lengths = []
         total_games, total_wins, total_losses, total_draws = 0, 0, 0, 0
+        rollout_n_legal = []
 
         for update in range(start_update, num_updates + 1):
 
@@ -241,6 +242,7 @@ if __name__ == "__main__":
                 next_obs = torch.Tensor(next_obs).to(device)
                 next_done = torch.Tensor(done).to(device)
                 next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
+                rollout_n_legal.extend(info["n_legal_moves"])
 
                 # Log episode completions
                 if "final_info" in info:
@@ -368,6 +370,14 @@ if __name__ == "__main__":
             writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
             writer.add_scalar("losses/explained_variance", explained_var, global_step)
 
+            legal_mean = int(np.mean(rollout_n_legal)) if rollout_n_legal else 0
+            legal_max = int(np.max(rollout_n_legal)) if rollout_n_legal else 0
+            if rollout_n_legal:
+                writer.add_scalar("charts/n_legal_moves_mean", np.mean(rollout_n_legal), global_step)
+                writer.add_scalar("charts/n_legal_moves_max", np.max(rollout_n_legal), global_step)
+                writer.add_scalar("charts/n_legal_moves_min", np.min(rollout_n_legal), global_step)
+            rollout_n_legal.clear()
+
             elapsed = time.time() - start_time
             sps = int(global_step / elapsed)
             updates_done = update - start_update + 1
@@ -378,6 +388,7 @@ if __name__ == "__main__":
                 f" SPS={sps}"
                 f" | pg={pg_loss.item():.4f} vf={v_loss.item():.4f} ent={entropy_loss.item():.3f}"
                 f" | kl={approx_kl.item():.4f} clip={np.mean(clipfracs):.3f}"
+                f" | legal={legal_mean}/{legal_max}"
             )
 
             # Checkpointing
