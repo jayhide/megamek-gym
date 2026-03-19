@@ -65,6 +65,7 @@ class MegaMekEnv(gymnasium.Env):
         self._last_flat_obs: np.ndarray | None = None
         self._legal_moves: list = []
         self._reset_timing: dict | None = None
+        self._java_crashed: bool = False
 
     @property
     def _port(self) -> int:
@@ -187,6 +188,10 @@ class MegaMekEnv(gymnasium.Env):
             "First obs received on port %d (%.1fs, total reset: %.1fs)",
             self._port, t_first_obs - t_connected, t_first_obs - t0,
         )
+        # Switch to shorter step timeout now that connection is established
+        self._sock.settimeout(self.config.step_timeout_seconds)
+        self._java_crashed = False
+
         self._rl_owner_id = identify_rl_owner(
             raw_obs, raw_obs["active_entity_id"]
         )
@@ -207,10 +212,21 @@ class MegaMekEnv(gymnasium.Env):
         return flat, info
 
     def step(self, action):
-        action_msg = json.dumps({"type": "action", "move_index": int(action)}) + "\n"
-        self._sock.sendall(action_msg.encode("utf-8"))
+        # If Java already crashed, keep returning terminal until reset() is called
+        if self._java_crashed:
+            return self._handle_crash("Java already crashed, awaiting reset")
 
-        raw_obs = self._read_obs()
+        action_msg = json.dumps({"type": "action", "move_index": int(action)}) + "\n"
+        try:
+            self._sock.sendall(action_msg.encode("utf-8"))
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            return self._handle_crash(f"Failed to send action: {e}")
+
+        try:
+            raw_obs = self._read_obs()
+        except ConnectionError as e:
+            return self._handle_crash(f"Failed to read observation: {e}")
+
         terminated = raw_obs.get("terminated", False)
         truncated = raw_obs.get("truncated", False)
 
@@ -233,6 +249,30 @@ class MegaMekEnv(gymnasium.Env):
 
         info = self._build_info(raw_obs)
         return flat, reward, terminated, truncated, info
+
+    def _handle_crash(self, reason: str):
+        """Return a graceful terminal step when Java crashes mid-game."""
+        logger.error(
+            "[port:%d] Java crash detected: %s\nJava log tail:\n  %s",
+            self._port, reason, self._java_log_tail(20),
+        )
+        self._java_crashed = True
+        self._legal_moves = []
+
+        crash_obs = {
+            "type": "observation",
+            "phase": "CRASH",
+            "round": self._last_raw_obs.get("round", 0) if self._last_raw_obs else 0,
+            "board": {},
+            "units": [],
+            "legal_moves": [],
+            "terminated": True,
+            "truncated": False,
+        }
+
+        info = self._build_info(crash_obs)
+        info["java_crash"] = 1
+        return self._last_flat_obs, 0.0, True, False, info
 
     def _build_info(self, raw_obs: dict) -> dict:
         # Gymnasium's AsyncVectorEnv._add_info cannot merge nested dicts/lists
@@ -268,6 +308,7 @@ class MegaMekEnv(gymnasium.Env):
             "n_legal_moves": len(self._legal_moves),
             "game_outcome": game_outcome,
             "game_rounds": game_round,
+            "java_crash": 0,
         }
         return info
 

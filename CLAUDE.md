@@ -156,6 +156,18 @@ runs/{exp_name}__{seed}__{timestamp}/
 - `--num-steps` (default 128) — rollout length; longer = better advantage estimates but more memory
 - `--learning-rate` (default 3e-4) — with `--anneal-lr` enabled by default
 
+**Recommended fast-training args:**
+```bash
+poetry run python train_ppo.py --megamek-dir ../megamek --config configs/default.yaml \
+  --num-envs 8 --num-steps 256 --stagger-delay 3
+```
+- `--config configs/default.yaml` — uses `firing_strategy: naive` (faster Princess AI) and `max_rotating_round_saves: 0` (no disk I/O from saves)
+- `--num-envs 8` — amortizes reset blocking (when one env resets, 7 others already contributed recent steps)
+- `--num-steps 256` — longer rollouts = fewer rollouts = less reset overhead per update
+- `--stagger-delay 3` — faster startup (default 10s is conservative)
+
+**Timing instrumentation:** Each update prints `rollout=Xs train=Ys episodes=N` to identify bottlenecks. Also logged to TensorBoard under `timing/rollout_seconds`, `timing/train_seconds`, `timing/episodes_per_rollout`.
+
 **Dependencies:** `torch`, `tensorboard` (added to pyproject.toml alongside gymnasium/numpy/pyyaml)
 
 ## Known Pitfalls
@@ -165,6 +177,12 @@ runs/{exp_name}__{seed}__{timestamp}/
 When a game ends, Java sends a terminal observation (`"terminated": true`) then exits. If `System.exit(0)` fires before the OS finishes transmitting the TCP data, the terminal observation is lost and Python's `readline()` hangs forever. With `AsyncVectorEnv`, this blocks all envs (they step in lockstep). Fixed on the Java side with `SO_LINGER` + a 200ms shutdown delay — see the Java-side `CLAUDE.md` for details.
 
 **Symptom**: training hangs after a game completes; one env's `readline()` never returns; Java logs show the terminal observation was "sent" but the JVM exited in the same millisecond.
+
+### Java crash recovery during training
+
+When the JVM crashes mid-game (e.g., NPE in Princess AI), `env.py` detects the broken connection within `step_timeout_seconds` (default 30s) and returns a synthetic terminal observation (`phase: "CRASH"`, `info["java_crash"] = 1`) instead of raising an exception. This allows `AsyncVectorEnv` to auto-reset the crashed env without blocking other envs. Crash counts are logged to TensorBoard (`charts/java_crashes`) and printed in training summaries as `C:{count}`.
+
+**Config**: `step_timeout_seconds` in `MegaMekConfig` (default 30). The longer 360s timeout is still used during `reset()` for initial connection.
 
 ### Gymnasium info dict and AsyncVectorEnv
 

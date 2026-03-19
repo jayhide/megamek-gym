@@ -212,7 +212,7 @@ if __name__ == "__main__":
         recent_returns = []
         recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
         recent_lengths = []
-        total_games, total_wins, total_losses, total_draws = 0, 0, 0, 0
+        total_games, total_wins, total_losses, total_draws, total_crashes = 0, 0, 0, 0, 0
         rollout_n_legal = []
 
         for update in range(start_update, num_updates + 1):
@@ -220,6 +220,9 @@ if __name__ == "__main__":
             if args.anneal_lr:
                 frac = 1.0 - (update - 1) / num_updates
                 optimizer.param_groups[0]["lr"] = frac * args.learning_rate
+
+            t_rollout_start = time.time()
+            episodes_this_rollout = 0
 
             for step in range(0, args.num_steps):
                 if step % 16 == 0:
@@ -257,8 +260,14 @@ if __name__ == "__main__":
                             recent_lengths.append(ep_len)
                             recent_rounds.append(rounds)
 
+                            crashed = fi.get("java_crash", 0) == 1
+
+                            episodes_this_rollout += 1
                             total_games += 1
-                            if outcome == 1:
+                            if crashed:
+                                total_crashes += 1
+                                outcome_str = "CRASH"
+                            elif outcome == 1:
                                 total_wins += 1
                                 recent_wins.append(1)
                                 outcome_str = "WIN"
@@ -278,6 +287,10 @@ if __name__ == "__main__":
                             writer.add_scalar("charts/game_rounds", rounds, global_step)
                             if total_games > 0:
                                 writer.add_scalar("charts/win_rate", total_wins / total_games, global_step)
+                            if crashed:
+                                writer.add_scalar("charts/java_crashes", total_crashes, global_step)
+
+            t_rollout_end = time.time()
 
             # GAE
             with torch.no_grad():
@@ -357,10 +370,18 @@ if __name__ == "__main__":
                 if args.target_kl is not None and approx_kl > args.target_kl:
                     break
 
+            t_train_end = time.time()
+
             y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
             var_y = np.var(y_true)
             explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
+            rollout_s = t_rollout_end - t_rollout_start
+            train_s = t_train_end - t_rollout_end
+
+            writer.add_scalar("timing/rollout_seconds", rollout_s, global_step)
+            writer.add_scalar("timing/train_seconds", train_s, global_step)
+            writer.add_scalar("timing/episodes_per_rollout", episodes_this_rollout, global_step)
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -389,6 +410,7 @@ if __name__ == "__main__":
                 f" | pg={pg_loss.item():.4f} vf={v_loss.item():.4f} ent={entropy_loss.item():.3f}"
                 f" | kl={approx_kl.item():.4f} clip={np.mean(clipfracs):.3f}"
                 f" | legal={legal_mean}/{legal_max}"
+                f" | rollout={rollout_s:.1f}s train={train_s:.1f}s episodes={episodes_this_rollout}"
             )
 
             # Checkpointing
@@ -415,11 +437,11 @@ if __name__ == "__main__":
 
                 print(f"\n--- Summary (updates {summary_start}-{update}) ---")
                 if recent_returns:
-                    print(f"  Episodes: {n_recent} (W:{n_recent_w} L:{n_recent_l} D:{n_recent_d} — {recent_wr:.1f}% win rate)")
+                    print(f"  Episodes: {n_recent} (W:{n_recent_w} L:{n_recent_l} D:{n_recent_d} C:{total_crashes} — {recent_wr:.1f}% win rate)")
                     print(f"  Mean return: {np.mean(recent_returns):.2f} | Mean length: {np.mean(recent_lengths):.0f} | Mean rounds: {np.mean(recent_rounds):.1f}")
                 else:
                     print(f"  Episodes: 0")
-                print(f"  Cumulative: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} — {cum_wr:.1f}%)")
+                print(f"  Cumulative: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} — {cum_wr:.1f}%)")
                 print(f"  Explained variance:  {explained_var:.4f}")
                 print(f"  Learning rate:       {optimizer.param_groups[0]['lr']:.2e}")
                 print(f"  Elapsed:             {fmt_time(elapsed)}")
@@ -435,7 +457,7 @@ if __name__ == "__main__":
         sps = int(global_step / elapsed) if elapsed > 0 else 0
         final_wr = total_wins / total_games * 100 if total_games > 0 else 0
         print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
-        print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} — {final_wr:.1f}% win rate)")
+        print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} — {final_wr:.1f}% win rate)")
 
     finally:
         writer.close()

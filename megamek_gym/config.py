@@ -33,13 +33,14 @@ class MegaMekConfig:
     connection_retries: int = 60
     connection_retry_delay: float = 1.0
     max_legal_moves: int = 1000
-    max_rotating_round_saves: int = 5000
+    max_rotating_round_saves: int = 0
     paranoid_autosave: bool = False
     save_budget_mb: int = 1000
     rl_starting_pos: int = 2
     opponent_starting_pos: int = 6
     rl_deployment: bool = False
     firing_strategy: str = "princess"
+    step_timeout_seconds: int = 30
 
     def __post_init__(self):
         # Validate that board dimensions can be resolved

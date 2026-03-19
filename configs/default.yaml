@@ -14,3 +14,5 @@ save_budget_mb: 1000
 rl_starting_pos: 2
 opponent_starting_pos: 6
 rl_deployment: false
+firing_strategy: naive
+step_timeout_seconds: 30

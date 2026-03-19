@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import signal
@@ -9,6 +10,20 @@ import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _set_pdeathsig():
+    """Ask the kernel to send SIGTERM to this process when its parent dies.
+
+    Prevents orphaned JVMs when training is interrupted with Ctrl-C:
+    AsyncVectorEnv workers may die from SIGINT before they can call
+    JavaProcess.stop(), leaving JVMs running. With PR_SET_PDEATHSIG,
+    the kernel automatically sends SIGTERM when the parent exits.
+    """
+    PR_SET_PDEATHSIG = 1
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+
 
 # JVM options matching rlJvmOptions in megamek/build.gradle
 _JVM_OPTIONS = [
@@ -138,6 +153,7 @@ class JavaProcess:
             stdout=self._stderr_file,  # JVM thread dumps (SIGQUIT) go to stdout
             stderr=subprocess.STDOUT,   # Merge stderr (Log4j2) into same file
             start_new_session=True,
+            preexec_fn=_set_pdeathsig,
         )
 
     def stop(self) -> None:
