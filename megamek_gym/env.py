@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import signal
 import socket
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import gymnasium
 import numpy as np
@@ -59,6 +64,7 @@ class MegaMekEnv(gymnasium.Env):
         self._last_raw_obs: dict | None = None
         self._last_flat_obs: np.ndarray | None = None
         self._legal_moves: list = []
+        self._reset_timing: dict | None = None
 
     @property
     def _port(self) -> int:
@@ -66,24 +72,32 @@ class MegaMekEnv(gymnasium.Env):
 
     def _cleanup_saves(self):
         """Delete autosave_* files (not needed for replay, which uses Round-* files).
-        Also enforce save_budget_mb by deleting oldest Round-* files if over budget."""
-        savegames_dir = Path(self.config.megamek_dir) / "megamek" / "savegames"
-        if not savegames_dir.is_dir():
-            return
+        Also enforce save_budget_mb by deleting oldest Round-* files if over budget.
+        Checks both the shared savegames dir and per-JVM run_{port}/savegames dirs."""
+        base = Path(self.config.megamek_dir) / "megamek"
+        # Check both the legacy shared dir and the per-JVM directory
+        dirs_to_check = [
+            base / "savegames",
+            base / f"run_{self._port}" / "savegames",
+        ]
 
-        # Remove autosave_* files (written at VICTORY, not used by replay UI)
-        for f in savegames_dir.glob("autosave_*.sav.gz"):
-            try:
-                f.unlink()
-            except OSError:
-                pass  # Another env may have already deleted it
+        all_round_files = []
+        for savegames_dir in dirs_to_check:
+            if not savegames_dir.is_dir():
+                continue
 
-        # Enforce save budget on Round-* files
+            # Remove autosave_* files (written at VICTORY, not used by replay UI)
+            for f in savegames_dir.glob("autosave_*.sav.gz"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass  # Another env may have already deleted it
+
+            all_round_files.extend(savegames_dir.glob("Round-*.sav.gz"))
+
+        # Enforce save budget on Round-* files across all dirs
         budget_bytes = self.config.save_budget_mb * 1024 * 1024
-        round_files = sorted(
-            savegames_dir.glob("Round-*.sav.gz"),
-            key=lambda f: f.stat().st_mtime,
-        )
+        round_files = sorted(all_round_files, key=lambda f: f.stat().st_mtime)
         total = sum(f.stat().st_size for f in round_files)
         while total > budget_bytes and round_files:
             oldest = round_files.pop(0)
@@ -97,9 +111,12 @@ class MegaMekEnv(gymnasium.Env):
         super().reset(seed=seed)
 
         self._cleanup_saves()
+        logger.info("Resetting env on port %d (env_index=%d)", self._port, self.config.env_index)
         self._cleanup()
 
         cfg = self.config
+
+        t0 = time.monotonic()
 
         # Start Java
         self._java = JavaProcess(
@@ -118,29 +135,58 @@ class MegaMekEnv(gymnasium.Env):
         )
         self._java.start()
 
+        t_java_started = time.monotonic()
+        logger.info("JVM started on port %d (%.1fs)", self._port, t_java_started - t0)
+
         # Connect with retry
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         connected = False
-        for _ in range(60):
+        timeout_s = cfg.connection_retries * cfg.connection_retry_delay
+        for _ in range(cfg.connection_retries):
             try:
                 self._sock.connect(("localhost", self._port))
                 connected = True
                 break
             except ConnectionRefusedError:
                 if not self._java.is_alive():
-                    raise RuntimeError("Java process died before accepting connection")
-                time.sleep(1.0)
+                    raise RuntimeError(
+                        f"Java process died before accepting connection.\n"
+                        f"Java log tail (rl_java_{self._port}.log):\n"
+                        f"  {self._java_log_tail()}"
+                    )
+                time.sleep(cfg.connection_retry_delay)
         if not connected:
             self._cleanup()
             raise RuntimeError(
-                f"Could not connect to Java on port {self._port} after 60s"
+                f"Could not connect to Java on port {self._port} after {timeout_s:.0f}s.\n"
+                f"Java log tail (rl_java_{self._port}.log):\n"
+                f"  {self._java_log_tail()}"
             )
+
+        t_connected = time.monotonic()
+        logger.info("Connected to JVM on port %d (%.1fs)", self._port, t_connected - t_java_started)
+
+        # Save partial timing so it's available even if _read_obs() fails
+        self._reset_timing = {
+            "java_start_s": t_java_started - t0,
+            "connect_s": t_connected - t_java_started,
+            "first_obs_s": None,
+            "total_reset_s": None,
+        }
 
         self._sock.settimeout(360)  # 6 min — longer than Java's 5-min socket timeout
         self._reader = self._sock.makefile("r", encoding="utf-8")
 
         # Read first observation
         raw_obs = self._read_obs()
+
+        t_first_obs = time.monotonic()
+        self._reset_timing["first_obs_s"] = t_first_obs - t_connected
+        self._reset_timing["total_reset_s"] = t_first_obs - t0
+        logger.info(
+            "First obs received on port %d (%.1fs, total reset: %.1fs)",
+            self._port, t_first_obs - t_connected, t_first_obs - t0,
+        )
         self._rl_owner_id = identify_rl_owner(
             raw_obs, raw_obs["active_entity_id"]
         )
@@ -197,14 +243,16 @@ class MegaMekEnv(gymnasium.Env):
                 rl_unit = u
             else:
                 enemy_unit = u
-        return {
-            "legal_moves": self._legal_moves,
+        # Gymnasium's AsyncVectorEnv._add_info cannot merge nested dicts/lists
+        # across envs during auto-reset. Only include scalars and numpy arrays
+        # at the top level. Complex objects are JSON-serialized as strings.
+        info = {
             "action_mask": self.action_masks(),
             "round": raw_obs.get("round", 0),
             "phase": raw_obs.get("phase", ""),
-            "rl_unit": rl_unit,
-            "enemy_unit": enemy_unit,
+            "n_legal_moves": len(self._legal_moves),
         }
+        return info
 
     def action_masks(self) -> np.ndarray:
         mask = np.zeros(self.config.max_legal_moves, dtype=bool)
@@ -220,37 +268,103 @@ class MegaMekEnv(gymnasium.Env):
         self._cleanup()
 
     def _cleanup(self):
+        port = self._port if hasattr(self, 'config') and self.config else '?'
+        logger.info("[cleanup:%s] START", port)
+
         if self._reader is not None:
             try:
                 self._reader.close()
             except Exception:
                 pass
             self._reader = None
+            logger.info("[cleanup:%s] reader closed", port)
+
         if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            logger.info("[cleanup:%s] sock.shutdown done", port)
             try:
                 self._sock.close()
             except Exception:
                 pass
             self._sock = None
+            logger.info("[cleanup:%s] sock.close done", port)
+
         if self._java is not None:
+            logger.info("[cleanup:%s] java.stop() START", port)
             self._java.stop()
+            logger.info("[cleanup:%s] java.stop() DONE", port)
             self._java = None
 
+        logger.info("[cleanup:%s] COMPLETE", port)
+
+    def _check_port_available(self, port: int) -> None:
+        """Fail fast if port is already in use."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("localhost", port))
+        except OSError as e:
+            raise RuntimeError(
+                f"Port {port} is already in use (cannot start RL bridge). "
+                f"Kill the process using the port or choose a different port."
+            ) from e
+
+    def _java_log_tail(self, n: int = 10) -> str:
+        """Return the last n lines of the Java log for this port, if available."""
+        log_path = Path(self.config.megamek_dir) / f"rl_java_{self._port}.log"
+        try:
+            lines = log_path.read_text().splitlines()
+            tail = lines[-n:] if len(lines) > n else lines
+            return "\n  ".join(tail)
+        except OSError:
+            return f"(log not found: {log_path})"
+
+    def _request_thread_dump(self):
+        """Send SIGQUIT to the JVM to trigger a thread dump (written to stderr log)."""
+        if self._java and self._java._process and self._java._process.poll() is None:
+            try:
+                os.kill(self._java._process.pid, signal.SIGQUIT)
+                logger.info("[port:%d] SIGQUIT sent for thread dump", self._port)
+                # Give JVM time to write the dump
+                time.sleep(1)
+            except (ProcessLookupError, OSError) as e:
+                logger.warning("[port:%d] Failed to send SIGQUIT: %s", self._port, e)
+
     def _read_obs(self) -> dict:
+        t0 = time.monotonic()
         try:
             line = self._reader.readline()
         except socket.timeout:
             alive = self._java.is_alive() if self._java else False
             status = "running" if alive else "dead"
+            if alive:
+                self._request_thread_dump()
             raise ConnectionError(
-                f"Timed out waiting for Java observation (Java process is {status}). "
-                f"Check {self.config.megamek_dir}/rl_java_{self._port}.log"
+                f"Timed out waiting for Java observation (Java process is {status}).\n"
+                f"Check rl_java_{self._port}.log for thread dump.\n"
+                f"Java log tail (rl_java_{self._port}.log):\n"
+                f"  {self._java_log_tail(20)}"
             )
+        elapsed = time.monotonic() - t0
         if not line:
             alive = self._java.is_alive() if self._java else False
             status = "running" if alive else "dead"
             raise ConnectionError(
-                f"Java process closed the connection (process is {status}). "
-                f"Check {self.config.megamek_dir}/rl_java_{self._port}.log"
+                f"Java process closed the connection after {elapsed:.3f}s (process is {status}).\n"
+                f"Java log tail (rl_java_{self._port}.log):\n"
+                f"  {self._java_log_tail()}"
             )
-        return json.loads(line)
+        obs = json.loads(line)
+        terminated = obs.get("terminated", False)
+        logger.debug(
+            "[port:%d] _read_obs: %d chars in %.3fs (terminated=%s, round=%s)",
+            self._port, len(line), elapsed, terminated, obs.get("round"),
+        )
+        if terminated:
+            logger.info(
+                "[port:%d] Terminal observation received (%.3fs)", self._port, elapsed,
+            )
+        return obs

@@ -84,6 +84,7 @@ tests/
 └── test_reward.py       # Reward function logic tests
 
 smoke_test.py            # End-to-end integration test with live Java process
+perf_test.py             # Multi-env startup timing and diagnostics
 train_ppo.py             # CleanRL-style PPO training script
 eval.py                  # Evaluation script for trained checkpoints
 ```
@@ -157,12 +158,52 @@ runs/{exp_name}__{seed}__{timestamp}/
 
 **Dependencies:** `torch`, `tensorboard` (added to pyproject.toml alongside gymnasium/numpy/pyyaml)
 
+## Known Pitfalls
+
+### JVM shutdown race (terminal observation lost)
+
+When a game ends, Java sends a terminal observation (`"terminated": true`) then exits. If `System.exit(0)` fires before the OS finishes transmitting the TCP data, the terminal observation is lost and Python's `readline()` hangs forever. With `AsyncVectorEnv`, this blocks all envs (they step in lockstep). Fixed on the Java side with `SO_LINGER` + a 200ms shutdown delay — see the Java-side `CLAUDE.md` for details.
+
+**Symptom**: training hangs after a game completes; one env's `readline()` never returns; Java logs show the terminal observation was "sent" but the JVM exited in the same millisecond.
+
+### Gymnasium info dict and AsyncVectorEnv
+
+Gymnasium's `AsyncVectorEnv._add_info()` merges info dicts from all envs into a single vectorized dict. It **cannot handle nested dicts or lists** (like `rl_unit`, `enemy_unit`, `legal_moves`) — it recurses into them and crashes when the structure differs between terminal and non-terminal steps. The `_build_info()` method in `env.py` only returns vector-safe types: scalars, numpy arrays, and `n_legal_moves` (an int count). If you need to add new info fields, keep them flat (no nested dicts/lists).
+
+### diagnose_reset.py
+
+Use `diagnose_reset.py` to reproduce multi-env issues in isolation:
+- **Test 1**: Single-process game + reset (no multiprocessing)
+- **Test 2**: Same as test 1 but inside a child process
+- **Test 3**: Two envs with `AsyncVectorEnv`, continues stepping through multiple auto-resets (reproduces the train_ppo.py pattern)
+
+```bash
+poetry run python diagnose_reset.py --megamek-dir ../megamek --test 3
+```
+
 ## Development Notes
 
 - **V1 scope**: movement phase only, 1v1, single mek per side, BattleForce 2 map
 - **Reward shaping** is done in Python (not Java) so you can iterate without recompiling
 - Parallel training uses per-environment port offsets: `port = rl_port + env_index`
 - The opponent is MegaMek's built-in Princess AI
+
+## Performance Testing
+
+Use `perf_test.py` to diagnose timeout issues when running multiple parallel environments:
+
+```bash
+# Baseline: single env, no contention
+poetry run python perf_test.py --megamek-dir ../megamek --num-envs 1 --mode sequential
+
+# Reproduce parallel startup (mimics AsyncVectorEnv)
+poetry run python perf_test.py --megamek-dir ../megamek --num-envs 4 --mode parallel
+
+# Test staggered startup to reduce contention
+poetry run python perf_test.py --megamek-dir ../megamek --num-envs 4 --mode staggered --stagger-delay 10
+```
+
+Reports per-env timing breakdown (Java start, socket connect, first observation) and diagnoses bottlenecks. Connection timeout is configurable via `connection_retries` and `connection_retry_delay` in config.
 
 ## Debugging Java Errors
 
