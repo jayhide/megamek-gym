@@ -210,6 +210,9 @@ if __name__ == "__main__":
         print(f"{'='*60}\n")
 
         recent_returns = []
+        recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
+        recent_lengths = []
+        total_games, total_wins, total_losses, total_draws = 0, 0, 0, 0
 
         for update in range(start_update, num_updates + 1):
 
@@ -244,10 +247,35 @@ if __name__ == "__main__":
                     for i, fi in enumerate(info["final_info"]):
                         if fi is not None and "episode" in fi:
                             ep_return = fi["episode"]["r"]
+                            ep_len = fi["episode"]["l"]
+                            outcome = fi.get("game_outcome", 0)
+                            rounds = fi.get("game_rounds", 0)
+
                             recent_returns.append(ep_return)
-                            print(f"  episode done: return={ep_return:.2f}, len={fi['episode']['l']}")
+                            recent_lengths.append(ep_len)
+                            recent_rounds.append(rounds)
+
+                            total_games += 1
+                            if outcome == 1:
+                                total_wins += 1
+                                recent_wins.append(1)
+                                outcome_str = "WIN"
+                            elif outcome == -1:
+                                total_losses += 1
+                                recent_losses.append(1)
+                                outcome_str = "LOSS"
+                            else:
+                                total_draws += 1
+                                recent_draws.append(1)
+                                outcome_str = "DRAW"
+
+                            print(f"  episode done: return={ep_return:.2f}, len={ep_len}, rounds={rounds}, outcome={outcome_str}")
                             writer.add_scalar("charts/episodic_return", ep_return, global_step)
-                            writer.add_scalar("charts/episodic_length", fi["episode"]["l"], global_step)
+                            writer.add_scalar("charts/episodic_length", ep_len, global_step)
+                            writer.add_scalar("charts/game_outcome", outcome, global_step)
+                            writer.add_scalar("charts/game_rounds", rounds, global_step)
+                            if total_games > 0:
+                                writer.add_scalar("charts/win_rate", total_wins / total_games, global_step)
 
             # GAE
             with torch.no_grad():
@@ -367,20 +395,36 @@ if __name__ == "__main__":
 
                 elapsed = time.time() - start_time
                 summary_start = max(start_update, update - args.save_interval + 1)
+                n_recent = len(recent_returns)
+                n_recent_w = len(recent_wins)
+                n_recent_l = len(recent_losses)
+                n_recent_d = len(recent_draws)
+                recent_wr = n_recent_w / n_recent * 100 if n_recent > 0 else 0
+                cum_wr = total_wins / total_games * 100 if total_games > 0 else 0
+
                 print(f"\n--- Summary (updates {summary_start}-{update}) ---")
                 if recent_returns:
-                    print(f"  Mean episodic return: {np.mean(recent_returns):.2f} ({len(recent_returns)} episodes)")
+                    print(f"  Episodes: {n_recent} (W:{n_recent_w} L:{n_recent_l} D:{n_recent_d} — {recent_wr:.1f}% win rate)")
+                    print(f"  Mean return: {np.mean(recent_returns):.2f} | Mean length: {np.mean(recent_lengths):.0f} | Mean rounds: {np.mean(recent_rounds):.1f}")
                 else:
-                    print(f"  Mean episodic return: N/A (0 episodes)")
+                    print(f"  Episodes: 0")
+                print(f"  Cumulative: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} — {cum_wr:.1f}%)")
                 print(f"  Explained variance:  {explained_var:.4f}")
                 print(f"  Learning rate:       {optimizer.param_groups[0]['lr']:.2e}")
                 print(f"  Elapsed:             {fmt_time(elapsed)}")
                 print()
                 recent_returns.clear()
+                recent_wins.clear()
+                recent_losses.clear()
+                recent_draws.clear()
+                recent_rounds.clear()
+                recent_lengths.clear()
 
         elapsed = time.time() - start_time
         sps = int(global_step / elapsed) if elapsed > 0 else 0
+        final_wr = total_wins / total_games * 100 if total_games > 0 else 0
         print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
+        print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} — {final_wr:.1f}% win rate)")
 
     finally:
         writer.close()

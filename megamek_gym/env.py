@@ -235,22 +235,39 @@ class MegaMekEnv(gymnasium.Env):
         return flat, reward, terminated, truncated, info
 
     def _build_info(self, raw_obs: dict) -> dict:
-        units = raw_obs.get("units", [])
-        rl_unit = None
-        enemy_unit = None
-        for u in units:
-            if u.get("owner") == self._rl_owner_id:
-                rl_unit = u
-            else:
-                enemy_unit = u
         # Gymnasium's AsyncVectorEnv._add_info cannot merge nested dicts/lists
         # across envs during auto-reset. Only include scalars and numpy arrays
         # at the top level. Complex objects are JSON-serialized as strings.
+        terminated = raw_obs.get("terminated", False)
+        game_round = raw_obs.get("round", 0)
+
+        # Determine game outcome (mirrors WinLossReward logic in reward.py)
+        # 1 = win, -1 = loss, 0 = draw/ongoing
+        game_outcome = 0
+        if terminated:
+            units = raw_obs.get("units", [])
+            if not units and self._last_raw_obs is not None:
+                units = self._last_raw_obs.get("units", [])
+            own_alive = any(
+                not u.get("destroyed", False) and not u.get("retreated", False)
+                for u in units if u.get("owner") == self._rl_owner_id
+            )
+            enemy_alive = any(
+                not u.get("destroyed", False) and not u.get("retreated", False)
+                for u in units if u.get("owner") != self._rl_owner_id
+            )
+            if own_alive and not enemy_alive:
+                game_outcome = 1
+            elif not own_alive and enemy_alive:
+                game_outcome = -1
+
         info = {
             "action_mask": self.action_masks(),
-            "round": raw_obs.get("round", 0),
+            "round": game_round,
             "phase": raw_obs.get("phase", ""),
             "n_legal_moves": len(self._legal_moves),
+            "game_outcome": game_outcome,
+            "game_rounds": game_round,
         }
         return info
 
