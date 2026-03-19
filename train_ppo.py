@@ -1,5 +1,6 @@
 import argparse
 from distutils.util import strtobool
+import logging
 import os
 import signal
 import sys
@@ -28,7 +29,11 @@ def make_env(env_index, args):
     # Resolve megamek_dir to absolute path before entering the subprocess,
     # since AsyncVectorEnv may change the working directory.
     megamek_dir = str(os.path.abspath(args.megamek_dir))
+    stagger_delay = args.stagger_delay
     def thunk():
+        delay = env_index * stagger_delay
+        if delay > 0:
+            time.sleep(delay)
         cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
         cfg.env_index = env_index
         cfg.megamek_dir = megamek_dir
@@ -85,6 +90,8 @@ def parse_args():
     parser.add_argument("--megamek-dir", type=str, default="../megamek")
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--port-base", type=int, default=9999)
+    parser.add_argument("--stagger-delay", type=float, default=10.0,
+                        help="Seconds between each env startup (0 to disable)")
 
     # PPO core
     parser.add_argument("--total-timesteps", type=int, default=500_000)
@@ -116,6 +123,11 @@ def parse_args():
 _shutting_down = False
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     args = parse_args()
 
     random.seed(args.seed)
@@ -186,11 +198,15 @@ if __name__ == "__main__":
 
         print(f"\n{'='*60}")
         print(f"  PPO Training — {args.exp_name}")
-        print(f"  Device: {device} | Envs: {args.num_envs}")
+        print(f"  Device: {device} | Envs: {args.num_envs} | Stagger: {args.stagger_delay}s")
         print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n}")
         print(f"  Timesteps: {args.total_timesteps:,} | Updates: {num_updates}")
         print(f"  Batch: {args.batch_size} | Minibatch: {args.minibatch_size}")
         print(f"  LR: {args.learning_rate} | Ent: {args.ent_coef} | Gamma: {args.gamma}")
+        print(f"  Java logs:")
+        for i in range(args.num_envs):
+            port = args.port_base + i
+            print(f"    env {i}: {args.megamek_dir}/rl_java_{port}.log")
         print(f"{'='*60}\n")
 
         recent_returns = []
@@ -202,6 +218,8 @@ if __name__ == "__main__":
                 optimizer.param_groups[0]["lr"] = frac * args.learning_rate
 
             for step in range(0, args.num_steps):
+                if step % 16 == 0:
+                    print(f"  rollout {update}: step {step}/{args.num_steps}", flush=True)
                 global_step += args.num_envs
                 obs_buf[step] = next_obs
                 dones_buf[step] = next_done

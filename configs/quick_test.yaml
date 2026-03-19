@@ -4,8 +4,8 @@ opponent_unit: Commando COM-2D
 board: Map Set 6/16x17 BattleForce 2
 rl_port: 9999
 env_index: 0
-java_timeout_minutes: 10
-connection_retries: 60
+java_timeout_minutes: 3
+connection_retries: 30
 connection_retry_delay: 1.0
 max_legal_moves: 1000
 max_rotating_round_saves: 0

@@ -30,6 +30,8 @@ class MegaMekConfig:
     rl_port: int = 9999
     env_index: int = 0
     java_timeout_minutes: int = 10
+    connection_retries: int = 60
+    connection_retry_delay: float = 1.0
     max_legal_moves: int = 1000
     max_rotating_round_saves: int = 5000
     paranoid_autosave: bool = False
