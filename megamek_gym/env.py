@@ -137,7 +137,7 @@ class MegaMekEnv(gymnasium.Env):
         self._java.start()
 
         t_java_started = time.monotonic()
-        logger.info("JVM started on port %d (%.1fs)", self._port, t_java_started - t0)
+        logger.debug("JVM started on port %d (%.1fs)", self._port, t_java_started - t0)
 
         # Connect with retry
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -165,7 +165,7 @@ class MegaMekEnv(gymnasium.Env):
             )
 
         t_connected = time.monotonic()
-        logger.info("Connected to JVM on port %d (%.1fs)", self._port, t_connected - t_java_started)
+        logger.debug("Connected to JVM on port %d (%.1fs)", self._port, t_connected - t_java_started)
 
         # Save partial timing so it's available even if _read_obs() fails
         self._reset_timing = {
@@ -327,7 +327,7 @@ class MegaMekEnv(gymnasium.Env):
 
     def _cleanup(self):
         port = self._port if hasattr(self, 'config') and self.config else '?'
-        logger.info("[cleanup:%s] START", port)
+        logger.debug("[cleanup:%s] START", port)
 
         if self._reader is not None:
             try:
@@ -335,28 +335,28 @@ class MegaMekEnv(gymnasium.Env):
             except Exception:
                 pass
             self._reader = None
-            logger.info("[cleanup:%s] reader closed", port)
+            logger.debug("[cleanup:%s] reader closed", port)
 
         if self._sock is not None:
             try:
                 self._sock.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
-            logger.info("[cleanup:%s] sock.shutdown done", port)
+            logger.debug("[cleanup:%s] sock.shutdown done", port)
             try:
                 self._sock.close()
             except Exception:
                 pass
             self._sock = None
-            logger.info("[cleanup:%s] sock.close done", port)
+            logger.debug("[cleanup:%s] sock.close done", port)
 
         if self._java is not None:
-            logger.info("[cleanup:%s] java.stop() START", port)
+            logger.debug("[cleanup:%s] java.stop() START", port)
             self._java.stop()
-            logger.info("[cleanup:%s] java.stop() DONE", port)
+            logger.debug("[cleanup:%s] java.stop() DONE", port)
             self._java = None
 
-        logger.info("[cleanup:%s] COMPLETE", port)
+        logger.debug("[cleanup:%s] COMPLETE", port)
 
     def _check_port_available(self, port: int) -> None:
         """Fail fast if port is already in use."""

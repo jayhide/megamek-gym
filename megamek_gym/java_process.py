@@ -161,37 +161,37 @@ class JavaProcess:
             return
         try:
             exit_code = self._process.poll()
-            logger.info("[stop:%d] poll() = %s", self.port, exit_code)
+            logger.debug("[stop:%d] poll() = %s", self.port, exit_code)
             if exit_code is not None:
-                logger.info("[stop:%d] already exited", self.port)
+                logger.debug("[stop:%d] already exited", self.port)
             else:
                 try:
                     pgid = os.getpgid(self._process.pid)
                 except OSError:
                     pgid = None
-                logger.info("[stop:%d] pgid=%s, pid=%s", self.port, pgid, self._process.pid)
+                logger.debug("[stop:%d] pgid=%s, pid=%s", self.port, pgid, self._process.pid)
                 # Send SIGQUIT first to get a JVM thread dump (written to stderr/log)
                 try:
                     os.kill(self._process.pid, signal.SIGQUIT)
-                    logger.info("[stop:%d] SIGQUIT sent (thread dump requested)", self.port)
+                    logger.debug("[stop:%d] SIGQUIT sent (thread dump requested)", self.port)
                     # Give JVM a moment to write the thread dump
                     try:
                         self._process.wait(timeout=2)
-                        logger.info("[stop:%d] exited after SIGQUIT", self.port)
+                        logger.debug("[stop:%d] exited after SIGQUIT", self.port)
                         return  # JVM exited on its own
                     except subprocess.TimeoutExpired:
                         pass  # Expected — SIGQUIT doesn't kill the JVM
                 except (ProcessLookupError, OSError):
-                    logger.info("[stop:%d] SIGQUIT: process already gone", self.port)
+                    logger.debug("[stop:%d] SIGQUIT: process already gone", self.port)
                 if pgid is not None:
                     try:
                         os.killpg(pgid, signal.SIGTERM)
-                        logger.info("[stop:%d] SIGTERM sent to pgid %s", self.port, pgid)
+                        logger.debug("[stop:%d] SIGTERM sent to pgid %s", self.port, pgid)
                     except ProcessLookupError:
-                        logger.info("[stop:%d] SIGTERM: process group already gone", self.port)
+                        logger.debug("[stop:%d] SIGTERM: process group already gone", self.port)
                 try:
                     self._process.wait(timeout=5)
-                    logger.info("[stop:%d] exited after SIGTERM", self.port)
+                    logger.debug("[stop:%d] exited after SIGTERM", self.port)
                 except subprocess.TimeoutExpired:
                     logger.info("[stop:%d] SIGTERM timeout, sending SIGKILL", self.port)
                     if pgid is not None:
@@ -201,9 +201,9 @@ class JavaProcess:
                             pass
                     else:
                         self._process.kill()
-                    logger.info("[stop:%d] final wait() START", self.port)
+                    logger.debug("[stop:%d] final wait() START", self.port)
                     self._process.wait()
-                    logger.info("[stop:%d] final wait() DONE", self.port)
+                    logger.debug("[stop:%d] final wait() DONE", self.port)
         except Exception as e:
             logger.warning("Error stopping Java process on port %d: %s", self.port, e)
         finally:
@@ -211,7 +211,7 @@ class JavaProcess:
             if self._stderr_file is not None:
                 self._stderr_file.close()
                 self._stderr_file = None
-            logger.info("[stop:%d] COMPLETE", self.port)
+            logger.debug("[stop:%d] COMPLETE", self.port)
 
     def is_alive(self) -> bool:
         return self._process is not None and self._process.poll() is None
