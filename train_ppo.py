@@ -90,7 +90,7 @@ def parse_args():
     parser.add_argument("--megamek-dir", type=str, default="../megamek")
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--port-base", type=int, default=9999)
-    parser.add_argument("--stagger-delay", type=float, default=10.0,
+    parser.add_argument("--stagger-delay", type=float, default=3.0,
                         help="Seconds between each env startup (0 to disable)")
 
     # PPO core
@@ -144,7 +144,8 @@ if __name__ == "__main__":
     ))
 
     envs = gym.vector.AsyncVectorEnv(
-      [make_env(i, args) for i in range(args.num_envs)]
+      [make_env(i, args) for i in range(args.num_envs)],
+      autoreset_mode="SameStep",
     )
 
     # Signal handler to ensure cleanup on Ctrl+C / external kill
@@ -247,48 +248,53 @@ if __name__ == "__main__":
                 next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
                 rollout_n_legal.extend(info["n_legal_moves"])
 
-                # Log episode completions
-                if "final_info" in info:
-                    for i, fi in enumerate(info["final_info"]):
-                        if fi is not None and "episode" in fi:
-                            ep_return = fi["episode"]["r"]
-                            ep_len = fi["episode"]["l"]
-                            outcome = fi.get("game_outcome", 0)
-                            rounds = fi.get("game_rounds", 0)
+                # Log episode completions (SameStep autoreset mode)
+                if "final_info" in info and "_final_info" in info:
+                    final_info = info["final_info"]
+                    final_mask = info["_final_info"]
+                    for i in range(args.num_envs):
+                        if not final_mask[i]:
+                            continue
+                        # Extract per-env episode stats
+                        ep_data = final_info.get("episode", {})
+                        ep_return = float(ep_data.get("r", [0])[i]) if "r" in ep_data else 0.0
+                        ep_len = int(ep_data.get("l", [0])[i]) if "l" in ep_data else 0
+                        outcome = int(final_info.get("game_outcome", np.zeros(args.num_envs))[i])
+                        rounds = int(final_info.get("game_rounds", np.zeros(args.num_envs))[i])
 
-                            recent_returns.append(ep_return)
-                            recent_lengths.append(ep_len)
-                            recent_rounds.append(rounds)
+                        recent_returns.append(ep_return)
+                        recent_lengths.append(ep_len)
+                        recent_rounds.append(rounds)
 
-                            crashed = fi.get("java_crash", 0) == 1
+                        crashed = int(final_info.get("java_crash", np.zeros(args.num_envs))[i]) == 1
 
-                            episodes_this_rollout += 1
-                            total_games += 1
-                            if crashed:
-                                total_crashes += 1
-                                outcome_str = "CRASH"
-                            elif outcome == 1:
-                                total_wins += 1
-                                recent_wins.append(1)
-                                outcome_str = "WIN"
-                            elif outcome == -1:
-                                total_losses += 1
-                                recent_losses.append(1)
-                                outcome_str = "LOSS"
-                            else:
-                                total_draws += 1
-                                recent_draws.append(1)
-                                outcome_str = "DRAW"
+                        episodes_this_rollout += 1
+                        total_games += 1
+                        if crashed:
+                            total_crashes += 1
+                            outcome_str = "CRASH"
+                        elif outcome == 1:
+                            total_wins += 1
+                            recent_wins.append(1)
+                            outcome_str = "WIN"
+                        elif outcome == -1:
+                            total_losses += 1
+                            recent_losses.append(1)
+                            outcome_str = "LOSS"
+                        else:
+                            total_draws += 1
+                            recent_draws.append(1)
+                            outcome_str = "DRAW"
 
-                            print(f"  episode done: return={ep_return:.2f}, len={ep_len}, rounds={rounds}, outcome={outcome_str}")
-                            writer.add_scalar("charts/episodic_return", ep_return, global_step)
-                            writer.add_scalar("charts/episodic_length", ep_len, global_step)
-                            writer.add_scalar("charts/game_outcome", outcome, global_step)
-                            writer.add_scalar("charts/game_rounds", rounds, global_step)
-                            if total_games > 0:
-                                writer.add_scalar("charts/win_rate", total_wins / total_games, global_step)
-                            if crashed:
-                                writer.add_scalar("charts/java_crashes", total_crashes, global_step)
+                        print(f"  episode done: return={ep_return:.2f}, len={ep_len}, rounds={rounds}, outcome={outcome_str}")
+                        writer.add_scalar("charts/episodic_return", ep_return, global_step)
+                        writer.add_scalar("charts/episodic_length", ep_len, global_step)
+                        writer.add_scalar("charts/game_outcome", outcome, global_step)
+                        writer.add_scalar("charts/game_rounds", rounds, global_step)
+                        if total_games > 0:
+                            writer.add_scalar("charts/win_rate", total_wins / total_games, global_step)
+                        if crashed:
+                            writer.add_scalar("charts/java_crashes", total_crashes, global_step)
 
             t_rollout_end = time.time()
 

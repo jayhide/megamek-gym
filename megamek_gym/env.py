@@ -110,13 +110,62 @@ class MegaMekEnv(gymnasium.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-
         self._cleanup_saves()
-        logger.info("Resetting env on port %d (env_index=%d)", self._port, self.config.env_index)
+
+        # Try persistent reset if we have a live connection
+        if (self._sock is not None and self._java is not None
+                and self._java.is_alive() and not self._java_crashed):
+            try:
+                return self._reset_persistent()
+            except Exception as e:
+                logger.warning(
+                    "[port:%d] Persistent reset failed (%s), falling back to cold restart",
+                    self._port, e,
+                )
+                self._cleanup()
+
+        return self._reset_cold()
+
+    def _reset_persistent(self):
+        """Reset by sending a reset message over the existing socket.
+        Java tears down the current game and starts a new one without restarting the JVM."""
+        t0 = time.monotonic()
+        logger.info("[port:%d] Persistent reset (reusing JVM)", self._port)
+
+        # Send reset message to Java
+        reset_msg = json.dumps({"type": "reset"}) + "\n"
+        self._sock.sendall(reset_msg.encode("utf-8"))
+
+        # Use longer timeout for reset (Java needs to set up new game)
+        self._sock.settimeout(360)
+
+        # Read first observation from new game
+        raw_obs = self._read_obs()
+
+        t_done = time.monotonic()
+        self._reset_timing = {
+            "java_start_s": 0.0,
+            "connect_s": 0.0,
+            "first_obs_s": t_done - t0,
+            "total_reset_s": t_done - t0,
+        }
+        logger.info(
+            "[port:%d] Persistent reset complete (%.1fs)",
+            self._port, t_done - t0,
+        )
+
+        # Switch to step timeout
+        self._sock.settimeout(self.config.step_timeout_seconds)
+        self._java_crashed = False
+
+        return self._process_first_obs(raw_obs)
+
+    def _reset_cold(self):
+        """Full cold restart: kill JVM, start new one, connect, read first obs."""
+        logger.info("Cold reset on port %d (env_index=%d)", self._port, self.config.env_index)
         self._cleanup()
 
         cfg = self.config
-
         t0 = time.monotonic()
 
         # Start Java
@@ -133,6 +182,7 @@ class MegaMekEnv(gymnasium.Env):
             opponent_starting_pos=cfg.opponent_starting_pos,
             rl_deployment=cfg.rl_deployment,
             firing_strategy=cfg.firing_strategy,
+            max_game_rounds=cfg.max_game_rounds,
         )
         self._java.start()
 
@@ -191,6 +241,12 @@ class MegaMekEnv(gymnasium.Env):
         # Switch to shorter step timeout now that connection is established
         self._sock.settimeout(self.config.step_timeout_seconds)
         self._java_crashed = False
+
+        return self._process_first_obs(raw_obs)
+
+    def _process_first_obs(self, raw_obs):
+        """Common logic for processing the first observation after any reset."""
+        cfg = self.config
 
         self._rl_owner_id = identify_rl_owner(
             raw_obs, raw_obs["active_entity_id"]

@@ -41,6 +41,7 @@ class MegaMekConfig:
     rl_deployment: bool = False
     firing_strategy: str = "princess"
     step_timeout_seconds: int = 30
+    max_game_rounds: int = 50
 
     def __post_init__(self):
         # Validate that board dimensions can be resolved

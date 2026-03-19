@@ -57,6 +57,7 @@ class JavaProcess:
         opponent_starting_pos: int = 6,
         rl_deployment: bool = False,
         firing_strategy: str = "princess",
+        max_game_rounds: int = 0,
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -70,6 +71,7 @@ class JavaProcess:
         self.opponent_starting_pos = opponent_starting_pos
         self.rl_deployment = rl_deployment
         self.firing_strategy = firing_strategy
+        self.max_game_rounds = max_game_rounds
         self._process: subprocess.Popen | None = None
         self._stderr_file = None
 
@@ -125,6 +127,7 @@ class JavaProcess:
             str(self.opponent_starting_pos),
             str(self.rl_deployment).lower(),
             self.firing_strategy,
+            str(self.max_game_rounds),
         ]
         cmd = [
             "java",

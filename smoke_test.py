@@ -83,19 +83,18 @@ def main():
         print(f"{'='*70}")
 
         obs, info = env.reset()
+        n_legal = info.get("n_legal_moves", 0)
         print(f"Reset complete. Obs shape: {obs.shape}, "
-              f"Legal moves: {len(info['legal_moves'])}")
-        print(f"  {_unit_summary(info.get('rl_unit'), 'RL ')}")
-        print(f"  {_unit_summary(info.get('enemy_unit'), 'Opp')}")
+              f"Legal moves: {n_legal}")
 
         step = 0
         total_reward = 0.0
         t0 = time.time()
 
         while True:
-            legal = info.get("legal_moves", [])
-            if legal:
-                action = np.random.randint(0, len(legal))
+            n_legal = info.get("n_legal_moves", 0)
+            if n_legal > 0:
+                action = np.random.randint(0, n_legal)
             else:
                 action = 0
 
@@ -107,10 +106,8 @@ def main():
                 f"  Step {step:3d} r={info.get('round', '?'):>2} "
                 f"{info.get('phase', '?'):<14s} "
                 f"reward={reward:+.3f} total={total_reward:+.3f} "
-                f"moves={len(info.get('legal_moves', [])): >4d}"
+                f"moves={info.get('n_legal_moves', 0): >4d}"
             )
-            print(f"    {_unit_summary(info.get('rl_unit'), 'RL ')}")
-            print(f"    {_unit_summary(info.get('enemy_unit'), 'Opp')}")
 
             if terminated or truncated:
                 elapsed = time.time() - t0

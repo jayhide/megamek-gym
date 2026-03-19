@@ -50,7 +50,7 @@ The Java side lives at:
 
 **Gradle task** in `megamek/build.gradle` (~line 596):
 ```
-./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment"
+./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds"
 ```
 Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
@@ -84,6 +84,7 @@ tests/
 └── test_reward.py       # Reward function logic tests
 
 smoke_test.py            # End-to-end integration test with live Java process
+smoke_test_truncation.py # Tests max_game_rounds truncation (RL bot stands still)
 perf_test.py             # Multi-env startup timing and diagnostics
 train_ppo.py             # CleanRL-style PPO training script
 eval.py                  # Evaluation script for trained checkpoints
@@ -169,6 +170,20 @@ poetry run python train_ppo.py --megamek-dir ../megamek --config configs/default
 **Timing instrumentation:** Each update prints `rollout=Xs train=Ys episodes=N` to identify bottlenecks. Also logged to TensorBoard under `timing/rollout_seconds`, `timing/train_seconds`, `timing/episodes_per_rollout`.
 
 **Dependencies:** `torch`, `tensorboard` (added to pyproject.toml alongside gymnasium/numpy/pyyaml)
+
+## Persistent JVM (Reset Without Restart)
+
+By default, the JVM stays alive between games. When `reset()` is called after a completed game, Python sends `{"type": "reset"}` over the existing socket instead of killing and restarting the JVM. Java tears down the current game (server, clients) and starts a fresh one using the same TCP connection.
+
+**Protocol flow (after terminal observation):**
+1. Java sends terminal obs (`terminated: true`), then waits for reset message
+2. Python sends `{"type": "reset"}\n`
+3. Java creates new Server, clients, game — sends first observation
+4. If Python disconnects (EOF) instead of sending reset, Java exits gracefully
+
+**Fallback:** If the persistent reset fails (socket error, Java crash), Python automatically falls back to a full cold restart (kill JVM, start new one, reconnect). This makes the feature backward-compatible with older Java versions that don't support the game loop.
+
+**Performance:** Reset drops from ~3.3s (cold JVM restart) to ~0.5s (persistent), roughly doubling training SPS.
 
 ## Known Pitfalls
 
