@@ -337,24 +337,13 @@ class MegaMekEnv(gymnasium.Env):
         terminated = raw_obs.get("terminated", False)
         game_round = raw_obs.get("round", 0)
 
-        # Determine game outcome (mirrors WinLossReward logic in reward.py)
-        # 1 = win, -1 = loss, 0 = draw/ongoing
+        # Determine game outcome: 1 = win, -1 = loss, 0 = draw/ongoing
         game_outcome = 0
         if terminated:
-            units = raw_obs.get("units", [])
-            if not units and self._last_raw_obs is not None:
-                units = self._last_raw_obs.get("units", [])
-            own_alive = any(
-                not u.get("destroyed", False) and not u.get("retreated", False)
-                for u in units if u.get("owner") == self._rl_owner_id
-            )
-            enemy_alive = any(
-                not u.get("destroyed", False) and not u.get("retreated", False)
-                for u in units if u.get("owner") != self._rl_owner_id
-            )
-            if own_alive and not enemy_alive:
+            outcome_str = raw_obs.get("game_outcome")
+            if outcome_str == "WIN":
                 game_outcome = 1
-            elif not own_alive and enemy_alive:
+            elif outcome_str == "LOSS":
                 game_outcome = -1
 
         info = {

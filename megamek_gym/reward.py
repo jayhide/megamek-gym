@@ -89,9 +89,18 @@ class WinLossReward(RewardFunction):
         if not terminated:
             return 0.0
 
+        # Use explicit outcome from Java if available
+        outcome = curr_obs.get("game_outcome")
+        if outcome == "WIN":
+            return self.scale
+        elif outcome == "LOSS":
+            return -self.scale
+        elif outcome is not None:
+            return 0.0
+
+        # Legacy fallback: infer from unit states
         units = curr_obs.get("units", [])
         if not units:
-            # Terminal obs may have empty units — use prev_obs
             units = prev_obs.get("units", [])
 
         own_alive = any(

@@ -115,6 +115,27 @@ class TestWinLossReward:
         terminal = {"terminated": True, "units": []}
         assert r.compute(prev, terminal, True) == 1.0
 
+    def test_game_outcome_win(self):
+        r = WinLossReward(scale=10.0)
+        r.reset()
+        r.set_rl_owner(0)
+        terminal = {"terminated": True, "units": [], "game_outcome": "WIN"}
+        assert r.compute({}, terminal, True) == 10.0
+
+    def test_game_outcome_loss(self):
+        r = WinLossReward(scale=10.0)
+        r.reset()
+        r.set_rl_owner(0)
+        terminal = {"terminated": True, "units": [], "game_outcome": "LOSS"}
+        assert r.compute({}, terminal, True) == -10.0
+
+    def test_game_outcome_draw(self):
+        r = WinLossReward(scale=10.0)
+        r.reset()
+        r.set_rl_owner(0)
+        terminal = {"terminated": True, "units": [], "game_outcome": "DRAW"}
+        assert r.compute({}, terminal, True) == 0.0
+
     def test_enemy_retreated_is_win(self):
         r = WinLossReward(scale=10.0)
         r.reset()

@@ -62,7 +62,7 @@ Newline-delimited JSON over TCP (default port 9999):
 
 - **Java → Python** (observation): `{"type": "observation", "round": N, "phase": "MOVEMENT", "board": {...}, "units": [...], "legal_moves": [...], "reward": 0.0, "terminated": false, "truncated": false}`
 - **Python → Java** (action): `{"type": "action", "move_index": N}`
-- Terminal observations have empty board/units/legal_moves with `terminated: true`
+- Terminal observations have empty board/units/legal_moves with `terminated: true` and `game_outcome: "WIN"|"LOSS"|"DRAW"`
 
 ## Project Structure
 
