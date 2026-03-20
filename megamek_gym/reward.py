@@ -332,16 +332,22 @@ class CompositeReward(RewardFunction):
                 (WinLossReward(), 10.0),
             ]
         self.components = components
+        self.last_details: list[tuple[str, float, float]] = []
 
     def compute(self, prev_obs: dict, curr_obs: dict, terminated: bool) -> float:
-        return sum(
-            weight * fn.compute(prev_obs, curr_obs, terminated)
-            for fn, weight in self.components
-        )
+        self.last_details = []
+        total = 0.0
+        for fn, weight in self.components:
+            raw = fn.compute(prev_obs, curr_obs, terminated)
+            weighted = weight * raw
+            self.last_details.append((type(fn).__name__, raw, weighted))
+            total += weighted
+        return total
 
     def reset(self) -> None:
         for fn, _ in self.components:
             fn.reset()
+        self.last_details = []
 
     def set_rl_owner(self, owner_id: int) -> None:
         for fn, _ in self.components:

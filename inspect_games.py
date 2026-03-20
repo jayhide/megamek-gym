@@ -24,6 +24,7 @@ import gymnasium as gym
 
 from megamek_gym.agent import load_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
+from megamek_gym.reward import CompositeReward
 
 
 def parse_args():
@@ -170,6 +171,21 @@ def print_game_transcript(game_dir, step_log, outcome="UNKNOWN", verbose=False):
                 phase = "GAME_END" if s["phase"] == "VICTORY" else s["phase"]
                 print(f"    {phase}: action {s['action']}/{s['n_legal_moves']} legal"
                       f"  ->  reward {r_str}")
+                # Show per-component reward breakdown
+                details = s.get("reward_details", [])
+                nonzero = [(name, raw, weighted) for name, raw, weighted in details
+                           if abs(weighted) > 1e-6]
+                if nonzero:
+                    parts = []
+                    for name, raw, weighted in nonzero:
+                        # Shorten class names for readability
+                        short = (name.replace("Reward", "")
+                                 .replace("DamageDelta", "Damage")
+                                 .replace("LocationDestruction", "LocDestroy")
+                                 .replace("RangeAdvantage", "Range")
+                                 .replace("WinLoss", "WinLoss"))
+                        parts.append(f"{short}={weighted:+.3f}")
+                    print(f"           ({', '.join(parts)})")
             cum = round_steps[-1]["cumulative_return"]
             print(f"    Cumulative return: {reward_color(f'{cum:+.3f}')}")
 
@@ -280,12 +296,23 @@ def main():
             episode_return += reward
             steps += 1
             done = terminated or truncated
+
+            # Capture per-component reward breakdown
+            reward_fn = env.unwrapped.reward_fn
+            reward_details = []
+            if isinstance(reward_fn, CompositeReward):
+                reward_details = [
+                    (name, raw, weighted)
+                    for name, raw, weighted in reward_fn.last_details
+                ]
+
             step_log.append({
                 "round": info.get("round", 0),
                 "phase": info.get("phase", ""),
                 "action": action,
                 "n_legal_moves": info.get("n_legal_moves", 0),
                 "reward": reward,
+                "reward_details": reward_details,
                 "cumulative_return": episode_return,
             })
 
