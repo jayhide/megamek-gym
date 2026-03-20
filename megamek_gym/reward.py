@@ -320,6 +320,63 @@ class RangeAdvantageReward(RewardFunction):
         self._rl_owner = owner_id
 
 
+def _cover_value(board_hexes: list[dict], x: int, y: int) -> float:
+    """Return cover value for the hex at (x, y).
+
+    Heavy Woods = 2.0 (+2 to-hit), Light Woods = 1.0 (+1 to-hit), else 0.0.
+    """
+    for h in board_hexes:
+        if h.get("x") == x and h.get("y") == y:
+            terrain = h.get("terrain", "")
+            if "Heavy Woods" in terrain:
+                return 2.0
+            if "Light Woods" in terrain:
+                return 1.0
+            return 0.0
+    return 0.0
+
+
+class CoverReward(RewardFunction):
+    """Reward for positioning in terrain that provides defensive cover.
+
+    Returns the cover value of the RL unit's hex only — the agent can't
+    control where the enemy stands, so enemy cover is not subtracted.
+    """
+
+    def __init__(self, scale: float = 1.0):
+        self.scale = scale
+        self._rl_owner: int = -1
+
+    def compute(self, prev_obs: dict, curr_obs: dict, terminated: bool) -> float:
+        units = curr_obs.get("units", [])
+        if not units:
+            return 0.0
+
+        rl_unit = None
+        for u in units:
+            if u.get("destroyed", False):
+                continue
+            if u["owner"] == self._rl_owner:
+                rl_unit = u
+
+        if rl_unit is None:
+            return 0.0
+
+        # Skip if undeployed
+        if rl_unit.get("x", -1) == -1:
+            return 0.0
+
+        board_hexes = curr_obs.get("board", {}).get("hexes", [])
+        rl_cover = _cover_value(board_hexes, rl_unit["x"], rl_unit["y"])
+        return self.scale * rl_cover
+
+    def reset(self) -> None:
+        self._rl_owner = -1
+
+    def set_rl_owner(self, owner_id: int) -> None:
+        self._rl_owner = owner_id
+
+
 class CompositeReward(RewardFunction):
     """Weighted sum of multiple reward functions."""
 
@@ -329,6 +386,7 @@ class CompositeReward(RewardFunction):
                 (DamageDeltaReward(), 1.0),
                 (LocationDestructionReward(), 1.0),
                 (RangeAdvantageReward(), 0.5),
+                (CoverReward(), 0.25),
                 (WinLossReward(), 10.0),
             ]
         self.components = components

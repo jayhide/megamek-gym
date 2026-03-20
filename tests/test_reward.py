@@ -3,9 +3,9 @@
 import pytest
 
 from megamek_gym.reward import (
-    CompositeReward, DamageDeltaReward, LocationDestructionReward,
+    CompositeReward, CoverReward, DamageDeltaReward, LocationDestructionReward,
     RangeAdvantageReward, WinLossReward,
-    _hex_distance, _range_quality,
+    _cover_value, _hex_distance, _range_quality,
 )
 
 
@@ -482,3 +482,141 @@ class TestRangeAdvantageReward:
         )
         reward = r.compute({}, obs, False)
         assert reward == pytest.approx(2.0)
+
+
+# --- Cover value helper ---
+
+class TestCoverValue:
+    def test_light_woods(self):
+        hexes = [{"x": 3, "y": 4, "terrain": "Level: 1  Features: Light Woods; "}]
+        assert _cover_value(hexes, 3, 4) == 1.0
+
+    def test_heavy_woods(self):
+        hexes = [{"x": 3, "y": 4, "terrain": "Level: 1  Features: Heavy Woods; "}]
+        assert _cover_value(hexes, 3, 4) == 2.0
+
+    def test_clear(self):
+        hexes = [{"x": 3, "y": 4, "terrain": "Level: 0  Features: ; "}]
+        assert _cover_value(hexes, 3, 4) == 0.0
+
+    def test_rough_no_cover(self):
+        hexes = [{"x": 3, "y": 4, "terrain": "Level: 1  Features: Rough; "}]
+        assert _cover_value(hexes, 3, 4) == 0.0
+
+    def test_hex_not_found(self):
+        hexes = [{"x": 0, "y": 0, "terrain": "Level: 1  Features: Light Woods; "}]
+        assert _cover_value(hexes, 5, 5) == 0.0
+
+
+# --- CoverReward ---
+
+def _make_cover_obs(rl_x=5, rl_y=5, enemy_x=8, enemy_y=5,
+                    rl_terrain="Level: 0  Features: ; ",
+                    enemy_terrain="Level: 0  Features: ; ",
+                    rl_destroyed=False, enemy_destroyed=False,
+                    include_board=True):
+    """Build an observation for cover reward tests."""
+    obs = {
+        "terminated": False,
+        "units": [
+            {"id": 1, "owner": 0, "x": rl_x, "y": rl_y,
+             "destroyed": rl_destroyed,
+             "armor": [{"location": "CT", "armor": 20, "armor_max": 30,
+                        "internal": 10, "internal_max": 15,
+                        "rear_armor": 0, "rear_armor_max": 0}]},
+            {"id": 2, "owner": 1, "x": enemy_x, "y": enemy_y,
+             "destroyed": enemy_destroyed,
+             "armor": [{"location": "CT", "armor": 15, "armor_max": 20,
+                        "internal": 8, "internal_max": 10,
+                        "rear_armor": 0, "rear_armor_max": 0}]},
+        ],
+    }
+    if include_board:
+        obs["board"] = {
+            "hexes": [
+                {"x": rl_x, "y": rl_y, "terrain": rl_terrain},
+                {"x": enemy_x, "y": enemy_y, "terrain": enemy_terrain},
+            ],
+        }
+    return obs
+
+
+class TestCoverReward:
+    def test_rl_in_light_woods(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(
+            rl_terrain="Level: 1  Features: Light Woods; ",
+        )
+        assert r.compute({}, obs, False) == pytest.approx(1.0)
+
+    def test_rl_in_heavy_woods(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(
+            rl_terrain="Level: 1  Features: Heavy Woods; ",
+        )
+        assert r.compute({}, obs, False) == pytest.approx(2.0)
+
+    def test_rl_in_open(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(
+            rl_terrain="Level: 0  Features: ; ",
+        )
+        assert r.compute({}, obs, False) == pytest.approx(0.0)
+
+    def test_enemy_cover_ignored(self):
+        """Enemy being in woods should not affect the reward."""
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(
+            rl_terrain="Level: 1  Features: Light Woods; ",
+            enemy_terrain="Level: 1  Features: Heavy Woods; ",
+        )
+        # Only RL cover matters
+        assert r.compute({}, obs, False) == pytest.approx(1.0)
+
+    def test_destroyed_unit_returns_zero(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(
+            rl_terrain="Level: 1  Features: Light Woods; ",
+            rl_destroyed=True,
+        )
+        assert r.compute({}, obs, False) == 0.0
+
+    def test_undeployed_unit_returns_zero(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(rl_x=-1, rl_y=-1)
+        assert r.compute({}, obs, False) == 0.0
+
+    def test_empty_units_returns_zero(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = {"terminated": True, "units": []}
+        assert r.compute({}, obs, True) == 0.0
+
+    def test_scale(self):
+        r = CoverReward(scale=3.0)
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(
+            rl_terrain="Level: 1  Features: Heavy Woods; ",
+        )
+        assert r.compute({}, obs, False) == pytest.approx(6.0)
+
+    def test_no_board_hexes(self):
+        r = CoverReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_cover_obs(include_board=False)
+        assert r.compute({}, obs, False) == 0.0
