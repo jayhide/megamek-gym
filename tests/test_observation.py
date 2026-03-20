@@ -5,6 +5,7 @@ import pytest
 
 from megamek_gym.observation import (
     BOARD_SIZE,
+    GLOBAL_FEATURES,
     MOVE_FEATURES,
     OBS_SIZE,
     UNIT_FEATURES,
@@ -160,6 +161,19 @@ class TestFlattenObservation:
         assert flat[enemy_offset] == pytest.approx(10 / 16)
         assert flat[enemy_offset + 1] == pytest.approx(12 / 17)
 
+    def test_rl_moves_first_false(self):
+        obs = _make_obs()
+        flat = flatten_observation(obs, rl_owner_id=0)
+        global_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        assert flat[global_offset] == 0.0
+
+    def test_rl_moves_first_true(self):
+        obs = _make_obs()
+        obs["rl_moves_first"] = True
+        flat = flatten_observation(obs, rl_owner_id=0)
+        global_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        assert flat[global_offset] == 1.0
+
     def test_terminal_empty_obs(self):
         obs = {
             "type": "observation",
@@ -197,7 +211,7 @@ class TestMoveFeatures:
 
     def test_obs_size_with_moves(self):
         size = compute_obs_size(16, 17, max_legal_moves=1000)
-        assert size == 16 * 17 + 2 * UNIT_FEATURES + 1000 * MOVE_FEATURES
+        assert size == 16 * 17 + 2 * UNIT_FEATURES + GLOBAL_FEATURES + 1000 * MOVE_FEATURES
 
     def test_backward_compat_no_moves(self):
         """Without max_legal_moves, obs size is unchanged."""
@@ -211,7 +225,7 @@ class TestMoveFeatures:
 
     def test_move_feature_values(self):
         flat = self._flat_with_moves()
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
 
         # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1, jumping=False, prone=False
         assert flat[move_offset] == pytest.approx(5 / 16)
@@ -233,7 +247,7 @@ class TestMoveFeatures:
     def test_padding_zeros(self):
         """Unused move slots should be all zeros."""
         flat = self._flat_with_moves()
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         # Moves 2..9 should be zeros (only 2 legal moves)
         pad_start = move_offset + 2 * MOVE_FEATURES
         pad_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
@@ -248,7 +262,7 @@ class TestMoveFeatures:
             legal_moves=[],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         move_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
         np.testing.assert_array_equal(flat[move_offset:move_end], 0.0)
 
@@ -263,7 +277,7 @@ class TestMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         assert flat[move_offset] == pytest.approx(3 / 16)
         assert flat[move_offset + 1] == pytest.approx(4 / 17)
         assert flat[move_offset + 2] == pytest.approx(0 / 5.0)

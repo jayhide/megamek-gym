@@ -8,8 +8,9 @@ BOARD_WIDTH = 16
 BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
 UNIT_FEATURES = 55
+GLOBAL_FEATURES = 1  # rl_moves_first
 MOVE_FEATURES = 6  # dest_x, dest_y, facing, mp_used, jumping, prone
-OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES  # 382 (without move features)
+OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES  # 383 (without move features)
 
 
 def compute_obs_size(board_width: int, board_height: int, max_legal_moves: int = 0) -> int:
@@ -18,7 +19,7 @@ def compute_obs_size(board_width: int, board_height: int, max_legal_moves: int =
     When max_legal_moves > 0, includes a block of move features
     (max_legal_moves * MOVE_FEATURES) appended after the unit features.
     """
-    return board_width * board_height + 2 * UNIT_FEATURES + max_legal_moves * MOVE_FEATURES
+    return board_width * board_height + 2 * UNIT_FEATURES + GLOBAL_FEATURES + max_legal_moves * MOVE_FEATURES
 
 MAX_ARMOR_LOCATIONS = 8
 MAX_WEAPONS = 7
@@ -67,6 +68,10 @@ def flatten_observation(
     if enemy_unit is not None:
         _encode_unit(result, offset, enemy_unit, board_width, board_height)
     offset += UNIT_FEATURES
+
+    # Global features
+    result[offset] = float(obs.get("rl_moves_first", False))
+    offset += GLOBAL_FEATURES
 
     # Encode move features
     if max_legal_moves > 0 and legal_moves:
