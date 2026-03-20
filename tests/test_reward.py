@@ -4,8 +4,8 @@ import pytest
 
 from megamek_gym.reward import (
     CompositeReward, CoverReward, DamageDeltaReward, LocationDestructionReward,
-    RangeAdvantageReward, WinLossReward,
-    _cover_value, _hex_distance, _range_quality,
+    PronePenaltyReward, RangeAdvantageReward, WinLossReward,
+    _cover_value, _get_prone_status, _hex_distance, _range_quality,
 )
 
 
@@ -620,3 +620,130 @@ class TestCoverReward:
         r.set_rl_owner(0)
         obs = _make_cover_obs(include_board=False)
         assert r.compute({}, obs, False) == 0.0
+
+
+# --- Prone status helper ---
+
+class TestGetProneStatus:
+    def test_not_prone(self):
+        units = [{"owner": 0, "destroyed": False, "prone": False}]
+        assert _get_prone_status(units, 0) is False
+
+    def test_prone(self):
+        units = [{"owner": 0, "destroyed": False, "prone": True}]
+        assert _get_prone_status(units, 0) is True
+
+    def test_destroyed_unit_skipped(self):
+        units = [{"owner": 0, "destroyed": True, "prone": True}]
+        assert _get_prone_status(units, 0) is None
+
+    def test_no_matching_owner(self):
+        units = [{"owner": 1, "destroyed": False, "prone": True}]
+        assert _get_prone_status(units, 0) is None
+
+    def test_missing_prone_field(self):
+        units = [{"owner": 0, "destroyed": False}]
+        assert _get_prone_status(units, 0) is False
+
+
+# --- PronePenaltyReward ---
+
+def _make_prone_obs(rl_prone=False, enemy_prone=False,
+                    rl_destroyed=False, enemy_destroyed=False):
+    """Build an observation for prone penalty tests."""
+    return {
+        "terminated": False,
+        "units": [
+            {"id": 1, "owner": 0, "prone": rl_prone,
+             "destroyed": rl_destroyed,
+             "armor": [{"location": "CT", "armor": 20, "armor_max": 30,
+                        "internal": 10, "internal_max": 15,
+                        "rear_armor": 0, "rear_armor_max": 0}]},
+            {"id": 2, "owner": 1, "prone": enemy_prone,
+             "destroyed": enemy_destroyed,
+             "armor": [{"location": "CT", "armor": 15, "armor_max": 20,
+                        "internal": 8, "internal_max": 10,
+                        "rear_armor": 0, "rear_armor_max": 0}]},
+        ],
+    }
+
+
+class TestPronePenaltyReward:
+    def test_first_obs_returns_zero(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_prone_obs(rl_prone=False)
+        assert r.compute({}, obs, False) == 0.0
+
+    def test_not_prone_to_prone_penalty(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=False)
+        r.compute({}, obs1, False)  # baseline
+
+        obs2 = _make_prone_obs(rl_prone=True)
+        reward = r.compute(obs1, obs2, False)
+        assert reward == pytest.approx(-1.0)
+
+    def test_prone_to_not_prone_no_reward(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=True)
+        r.compute({}, obs1, False)  # baseline
+
+        obs2 = _make_prone_obs(rl_prone=False)
+        reward = r.compute(obs1, obs2, False)
+        assert reward == 0.0
+
+    def test_prone_to_prone_no_reward(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=True)
+        r.compute({}, obs1, False)
+
+        obs2 = _make_prone_obs(rl_prone=True)
+        assert r.compute(obs1, obs2, False) == 0.0
+
+    def test_not_prone_to_not_prone_no_reward(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=False)
+        r.compute({}, obs1, False)
+
+        obs2 = _make_prone_obs(rl_prone=False)
+        assert r.compute(obs1, obs2, False) == 0.0
+
+    def test_terminal_empty_units(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=False)
+        r.compute({}, obs1, False)
+
+        terminal = {"terminated": True, "units": []}
+        assert r.compute(obs1, terminal, True) == 0.0
+
+    def test_scale(self):
+        r = PronePenaltyReward(scale=2.0)
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=False)
+        r.compute({}, obs1, False)
+
+        obs2 = _make_prone_obs(rl_prone=True)
+        assert r.compute(obs1, obs2, False) == pytest.approx(-2.0)
+
+    def test_destroyed_unit_returns_zero(self):
+        r = PronePenaltyReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs1 = _make_prone_obs(rl_prone=False)
+        r.compute({}, obs1, False)
+
+        obs2 = _make_prone_obs(rl_prone=True, rl_destroyed=True)
+        assert r.compute(obs1, obs2, False) == 0.0

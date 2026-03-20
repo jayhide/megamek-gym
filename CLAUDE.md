@@ -27,7 +27,7 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
 
 - **Observation space**: `Box(shape=(W*H + 111 + max_legal_moves * 6,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55) + global features (1) + move features (max_legal_moves × 6). Default board (16x17) with 1000 max moves gives 6383. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). The 6 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `jumping` (bool), `prone` (bool). Unused slots (index >= n_legal_moves) are zero-padded.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
-- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 0.25x Cover + 10x WinLoss). DamageDelta weights internal structure damage at 2x armor. LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage scores how well each side's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages, then rewards the difference (RL quality − enemy quality). Cover rewards the RL unit for positioning in terrain with to-hit modifiers (Light Woods=1.0, Heavy Woods=2.0); only RL cover is scored since the agent can't control enemy positioning.
+- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 0.25x Cover + 0.5x PronePenalty + 10x WinLoss). DamageDelta weights internal structure damage at 2x armor. LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage scores how well each side's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages, then rewards the difference (RL quality − enemy quality). Cover rewards the RL unit for positioning in terrain with to-hit modifiers (Light Woods=1.0, Heavy Woods=2.0); only RL cover is scored since the agent can't control enemy positioning. PronePenalty applies -1.0 when the RL unit transitions from not-prone to prone (all such transitions are involuntary falls since the Java move enumeration never offers "go prone").
 
 ## Dependencies on `../megamek` Repo
 
@@ -203,6 +203,10 @@ When a game ends, Java sends a terminal observation (`"terminated": true`) then 
 When the JVM crashes mid-game (e.g., NPE in Princess AI), `env.py` detects the broken connection within `step_timeout_seconds` (default 30s) and returns a synthetic terminal observation (`phase: "CRASH"`, `info["java_crash"] = 1`) instead of raising an exception. This allows `AsyncVectorEnv` to auto-reset the crashed env without blocking other envs. Crash counts are logged to TensorBoard (`charts/java_crashes`) and printed in training summaries as `C:{count}`.
 
 **Config**: `step_timeout_seconds` in `MegaMekConfig` (default 30). The longer 360s timeout is still used during `reset()` for initial connection.
+
+### Early termination (prone + leg destroyed)
+
+When the RL unit is prone with at least one destroyed leg (LL or RL with `internal == 0`), it cannot stand and is effectively doomed. Rather than waste training time playing out a lost game, `env.py` detects this in `step()` and immediately terminates the episode as a loss. The observation gets `game_outcome: "LOSS"` injected so WinLoss reward fires normally. Early terminations force a cold JVM restart (`_java_crashed = True`) since Java is still mid-game. Counts are logged to TensorBoard (`charts/early_terminations`) and printed as `E:{count}` in training summaries.
 
 ### Gymnasium info dict and AsyncVectorEnv
 

@@ -377,6 +377,60 @@ class CoverReward(RewardFunction):
         self._rl_owner = owner_id
 
 
+def _get_prone_status(units: list[dict], owner_id: int) -> bool | None:
+    """Return prone status for the first non-destroyed unit belonging to owner.
+
+    Returns None if no matching unit found.
+    """
+    for u in units:
+        if u["owner"] == owner_id and not u.get("destroyed", False):
+            return bool(u.get("prone", False))
+    return None
+
+
+class PronePenaltyReward(RewardFunction):
+    """Penalty when the RL unit involuntarily falls prone.
+
+    All not-prone → prone transitions are involuntary (failed PSR from damage,
+    terrain, etc.) since the Java-side legal move enumeration never includes
+    "go prone" as a deliberate action.
+    """
+
+    def __init__(self, scale: float = 1.0):
+        self.scale = scale
+        self._rl_owner: int = -1
+        self._prev_prone: bool | None = None
+
+    def compute(self, prev_obs: dict, curr_obs: dict, terminated: bool) -> float:
+        units = curr_obs.get("units", [])
+        if not units:
+            return 0.0
+
+        curr_prone = _get_prone_status(units, self._rl_owner)
+        if curr_prone is None:
+            return 0.0
+
+        prev_prone = self._prev_prone
+        self._prev_prone = curr_prone
+
+        if prev_prone is None:
+            # First observation — no transition to judge
+            return 0.0
+
+        if not prev_prone and curr_prone:
+            # Fell prone — penalty
+            return -1.0 * self.scale
+
+        return 0.0
+
+    def reset(self) -> None:
+        self._rl_owner = -1
+        self._prev_prone = None
+
+    def set_rl_owner(self, owner_id: int) -> None:
+        self._rl_owner = owner_id
+
+
 class CompositeReward(RewardFunction):
     """Weighted sum of multiple reward functions."""
 
@@ -387,6 +441,7 @@ class CompositeReward(RewardFunction):
                 (LocationDestructionReward(), 1.0),
                 (RangeAdvantageReward(), 0.5),
                 (CoverReward(), 0.25),
+                (PronePenaltyReward(), 0.5),
                 (WinLossReward(), 10.0),
             ]
         self.components = components
