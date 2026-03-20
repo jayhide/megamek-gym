@@ -50,7 +50,8 @@ class MegaMekEnv(gymnasium.Env):
         self.reward_fn = reward_fn or CompositeReward()
 
         obs_size = compute_obs_size(
-            config.resolved_board_width, config.resolved_board_height
+            config.resolved_board_width, config.resolved_board_height,
+            config.max_legal_moves,
         )
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(obs_size,), dtype=np.float32
@@ -261,6 +262,8 @@ class MegaMekEnv(gymnasium.Env):
         flat = flatten_observation(
             raw_obs, self._rl_owner_id,
             cfg.resolved_board_width, cfg.resolved_board_height,
+            legal_moves=self._legal_moves,
+            max_legal_moves=cfg.max_legal_moves,
         )
         self._last_flat_obs = flat
 
@@ -289,6 +292,9 @@ class MegaMekEnv(gymnasium.Env):
         prev_raw = self._last_raw_obs
         reward = self.reward_fn.compute(prev_raw, raw_obs, terminated)
 
+        self._last_raw_obs = raw_obs
+        self._legal_moves = raw_obs.get("legal_moves", [])
+
         if terminated or truncated:
             # Terminal obs may have empty data — reuse last valid flat obs
             flat = self._last_flat_obs
@@ -297,11 +303,10 @@ class MegaMekEnv(gymnasium.Env):
                 raw_obs, self._rl_owner_id,
                 self.config.resolved_board_width,
                 self.config.resolved_board_height,
+                legal_moves=self._legal_moves,
+                max_legal_moves=self.config.max_legal_moves,
             )
             self._last_flat_obs = flat
-
-        self._last_raw_obs = raw_obs
-        self._legal_moves = raw_obs.get("legal_moves", [])
 
         info = self._build_info(raw_obs)
         return flat, reward, terminated, truncated, info

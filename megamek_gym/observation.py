@@ -8,12 +8,17 @@ BOARD_WIDTH = 16
 BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
 UNIT_FEATURES = 55
-OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES  # 382
+MOVE_FEATURES = 6  # dest_x, dest_y, facing, mp_used, jumping, prone
+OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES  # 382 (without move features)
 
 
-def compute_obs_size(board_width: int, board_height: int) -> int:
-    """Compute observation vector size for a given board."""
-    return board_width * board_height + 2 * UNIT_FEATURES
+def compute_obs_size(board_width: int, board_height: int, max_legal_moves: int = 0) -> int:
+    """Compute observation vector size for a given board.
+
+    When max_legal_moves > 0, includes a block of move features
+    (max_legal_moves * MOVE_FEATURES) appended after the unit features.
+    """
+    return board_width * board_height + 2 * UNIT_FEATURES + max_legal_moves * MOVE_FEATURES
 
 MAX_ARMOR_LOCATIONS = 8
 MAX_WEAPONS = 7
@@ -24,12 +29,15 @@ def flatten_observation(
     rl_owner_id: int,
     board_width: int = BOARD_WIDTH,
     board_height: int = BOARD_HEIGHT,
+    legal_moves: list | None = None,
+    max_legal_moves: int = 0,
 ) -> np.ndarray:
     """Flatten a JSON observation dict into a fixed-size float32 array.
 
-    Returns shape (382,) array with values in [-1, 1].
+    When max_legal_moves > 0, appends a block of move features
+    (max_legal_moves * MOVE_FEATURES) after the unit features.
     """
-    obs_size = compute_obs_size(board_width, board_height)
+    obs_size = compute_obs_size(board_width, board_height, max_legal_moves)
     result = np.zeros(obs_size, dtype=np.float32)
 
     # Board block: elevation per hex, row-major, normalized by /10
@@ -58,8 +66,40 @@ def flatten_observation(
     offset += UNIT_FEATURES
     if enemy_unit is not None:
         _encode_unit(result, offset, enemy_unit, board_width, board_height)
+    offset += UNIT_FEATURES
+
+    # Encode move features
+    if max_legal_moves > 0 and legal_moves:
+        _flatten_move_features(
+            result, offset, legal_moves, max_legal_moves, board_width, board_height
+        )
 
     return result
+
+
+def _flatten_move_features(
+    buf: np.ndarray,
+    offset: int,
+    legal_moves: list,
+    max_legal_moves: int,
+    board_width: int,
+    board_height: int,
+) -> None:
+    """Write normalized move features into buf[offset:offset + max_legal_moves * MOVE_FEATURES].
+
+    Each move gets 6 floats: dest_x/W, dest_y/H, facing/5, mp_used/20, jumping, prone.
+    Unused slots (index >= len(legal_moves)) stay zero.
+    """
+    n = min(len(legal_moves), max_legal_moves)
+    for i in range(n):
+        m = legal_moves[i]
+        base = offset + i * MOVE_FEATURES
+        buf[base] = m.get("dest_x", 0) / board_width
+        buf[base + 1] = m.get("dest_y", 0) / board_height
+        buf[base + 2] = m.get("facing", 0) / 5.0
+        buf[base + 3] = m.get("mp_used", 0) / 20.0
+        buf[base + 4] = float(m.get("jumping", False))
+        buf[base + 5] = float(m.get("prone", False))
 
 
 def _encode_unit(

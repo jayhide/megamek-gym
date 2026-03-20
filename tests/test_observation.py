@@ -5,8 +5,10 @@ import pytest
 
 from megamek_gym.observation import (
     BOARD_SIZE,
+    MOVE_FEATURES,
     OBS_SIZE,
     UNIT_FEATURES,
+    compute_obs_size,
     flatten_observation,
     identify_rl_owner,
 )
@@ -73,8 +75,8 @@ def _make_obs(rl_owner=0, enemy_owner=1, hexes=None):
             _make_unit(enemy_owner, unit_id=2, x=10, y=12, facing=4),
         ],
         "legal_moves": [
-            {"index": 0, "dest_x": 5, "dest_y": 6, "facing": 2, "mp_used": 1},
-            {"index": 1, "dest_x": 6, "dest_y": 7, "facing": 3, "mp_used": 2},
+            {"index": 0, "dest_x": 5, "dest_y": 6, "facing": 2, "mp_used": 1, "jumping": False, "prone": False},
+            {"index": 1, "dest_x": 6, "dest_y": 7, "facing": 3, "mp_used": 2, "jumping": True, "prone": False},
         ],
     }
 
@@ -175,6 +177,107 @@ class TestFlattenObservation:
         flat = flatten_observation(obs, rl_owner_id=0)
         assert flat.min() >= -1.0
         assert flat.max() <= 1.0
+
+
+class TestMoveFeatures:
+    """Tests for legal move feature embedding in the observation."""
+
+    MAX_MOVES = 10  # small value for tests
+
+    def _flat_with_moves(self, obs=None, max_legal_moves=None):
+        if obs is None:
+            obs = _make_obs()
+        if max_legal_moves is None:
+            max_legal_moves = self.MAX_MOVES
+        return flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=max_legal_moves,
+        )
+
+    def test_obs_size_with_moves(self):
+        size = compute_obs_size(16, 17, max_legal_moves=1000)
+        assert size == 16 * 17 + 2 * UNIT_FEATURES + 1000 * MOVE_FEATURES
+
+    def test_backward_compat_no_moves(self):
+        """Without max_legal_moves, obs size is unchanged."""
+        size = compute_obs_size(16, 17)
+        assert size == OBS_SIZE
+
+    def test_output_shape(self):
+        flat = self._flat_with_moves()
+        expected = compute_obs_size(16, 17, self.MAX_MOVES)
+        assert flat.shape == (expected,)
+
+    def test_move_feature_values(self):
+        flat = self._flat_with_moves()
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+
+        # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1, jumping=False, prone=False
+        assert flat[move_offset] == pytest.approx(5 / 16)
+        assert flat[move_offset + 1] == pytest.approx(6 / 17)
+        assert flat[move_offset + 2] == pytest.approx(2 / 5.0)
+        assert flat[move_offset + 3] == pytest.approx(1 / 20.0)
+        assert flat[move_offset + 4] == 0.0  # not jumping
+        assert flat[move_offset + 5] == 0.0  # not prone
+
+        # Move 1: dest_x=6, dest_y=7, facing=3, mp_used=2, jumping=True, prone=False
+        m1 = move_offset + MOVE_FEATURES
+        assert flat[m1] == pytest.approx(6 / 16)
+        assert flat[m1 + 1] == pytest.approx(7 / 17)
+        assert flat[m1 + 2] == pytest.approx(3 / 5.0)
+        assert flat[m1 + 3] == pytest.approx(2 / 20.0)
+        assert flat[m1 + 4] == 1.0  # jumping
+        assert flat[m1 + 5] == 0.0  # not prone
+
+    def test_padding_zeros(self):
+        """Unused move slots should be all zeros."""
+        flat = self._flat_with_moves()
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        # Moves 2..9 should be zeros (only 2 legal moves)
+        pad_start = move_offset + 2 * MOVE_FEATURES
+        pad_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
+        np.testing.assert_array_equal(flat[pad_start:pad_end], 0.0)
+
+    def test_no_legal_moves_all_zeros(self):
+        """When legal_moves is empty, all move feature slots are zero."""
+        obs = _make_obs()
+        obs["legal_moves"] = []
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=[],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        move_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
+        np.testing.assert_array_equal(flat[move_offset:move_end], 0.0)
+
+    def test_deployment_move_zeros(self):
+        """Deployment moves (no mp_used/jumping/prone) should default to 0."""
+        obs = _make_obs()
+        obs["legal_moves"] = [
+            {"index": 0, "dest_x": 3, "dest_y": 4, "facing": 0},
+        ]
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES
+        assert flat[move_offset] == pytest.approx(3 / 16)
+        assert flat[move_offset + 1] == pytest.approx(4 / 17)
+        assert flat[move_offset + 2] == pytest.approx(0 / 5.0)
+        assert flat[move_offset + 3] == 0.0  # mp_used defaults to 0
+        assert flat[move_offset + 4] == 0.0  # jumping defaults to 0
+        assert flat[move_offset + 5] == 0.0  # prone defaults to 0
+
+    def test_unit_features_unchanged(self):
+        """Adding move features should not affect board or unit encoding."""
+        obs = _make_obs()
+        flat_without = flatten_observation(obs, rl_owner_id=0)
+        flat_with = self._flat_with_moves(obs)
+        # First OBS_SIZE elements should be identical
+        np.testing.assert_array_equal(flat_with[:OBS_SIZE], flat_without[:OBS_SIZE])
 
 
 class TestIdentifyRlOwner:
