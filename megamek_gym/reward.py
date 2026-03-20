@@ -214,6 +214,112 @@ class LocationDestructionReward(RewardFunction):
         self._rl_owner = owner_id
 
 
+def _hex_distance(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Hex distance using offset coordinates (even-column offset, MegaMek convention).
+
+    Converts to cube coordinates then computes standard hex distance.
+    """
+    # Convert even-column offset to cube coordinates
+    def _to_cube(x: int, y: int) -> tuple[int, int, int]:
+        q = x
+        r = y - (x + (x & 1)) // 2
+        s = -q - r
+        return q, r, s
+
+    q1, r1, s1 = _to_cube(x1, y1)
+    q2, r2, s2 = _to_cube(x2, y2)
+    return (abs(q1 - q2) + abs(r1 - r2) + abs(s1 - s2)) // 2
+
+
+def _range_quality(unit: dict, distance: int) -> float:
+    """Score how well a unit's weapons perform at the given distance.
+
+    Returns a damage-weighted average of per-weapon range bracket scores:
+    - distance < min_range: -0.5
+    - distance <= short_range: 1.0
+    - distance <= medium_range: 0.5
+    - distance <= long_range: 0.0
+    - distance > long_range: -0.5
+    """
+    total_score = 0.0
+    total_damage = 0.0
+    for w in unit.get("weapons", []):
+        if w.get("destroyed", False):
+            continue
+        damage = w.get("damage", 0)
+        if damage <= 0:
+            continue
+        min_range = w.get("min_range", 0)
+        short = w.get("short_range", 0)
+        medium = w.get("medium_range", 0)
+        long = w.get("long_range", 0)
+
+        if distance < min_range:
+            score = -0.5
+        elif distance <= short:
+            score = 1.0
+        elif distance <= medium:
+            score = 0.5
+        elif distance <= long:
+            score = 0.0
+        else:
+            score = -0.5
+
+        total_score += score * damage
+        total_damage += damage
+
+    if total_damage == 0:
+        return 0.0
+    return total_score / total_damage
+
+
+class RangeAdvantageReward(RewardFunction):
+    """Reward for positioning at favorable weapon ranges relative to opponent.
+
+    Computes the difference in range quality between the RL unit and enemy unit.
+    Positive when RL's weapons are more effective at the current distance than
+    the enemy's weapons.
+    """
+
+    def __init__(self, scale: float = 1.0):
+        self.scale = scale
+        self._rl_owner: int = -1
+
+    def compute(self, prev_obs: dict, curr_obs: dict, terminated: bool) -> float:
+        units = curr_obs.get("units", [])
+        if not units:
+            return 0.0
+
+        rl_unit = None
+        enemy_unit = None
+        for u in units:
+            if u.get("destroyed", False):
+                continue
+            if u["owner"] == self._rl_owner:
+                rl_unit = u
+            else:
+                enemy_unit = u
+
+        if rl_unit is None or enemy_unit is None:
+            return 0.0
+
+        # Skip if either unit is undeployed
+        if rl_unit.get("x", -1) == -1 or enemy_unit.get("x", -1) == -1:
+            return 0.0
+
+        dist = _hex_distance(rl_unit["x"], rl_unit["y"],
+                             enemy_unit["x"], enemy_unit["y"])
+        range_advantage = (_range_quality(rl_unit, dist)
+                           - _range_quality(enemy_unit, dist))
+        return self.scale * range_advantage
+
+    def reset(self) -> None:
+        self._rl_owner = -1
+
+    def set_rl_owner(self, owner_id: int) -> None:
+        self._rl_owner = owner_id
+
+
 class CompositeReward(RewardFunction):
     """Weighted sum of multiple reward functions."""
 
@@ -222,6 +328,7 @@ class CompositeReward(RewardFunction):
             components = [
                 (DamageDeltaReward(), 1.0),
                 (LocationDestructionReward(), 1.0),
+                (RangeAdvantageReward(), 0.5),
                 (WinLossReward(), 10.0),
             ]
         self.components = components

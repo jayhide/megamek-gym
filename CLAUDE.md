@@ -27,7 +27,7 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
 
 - **Observation space**: `Box(shape=(W*H + 111 + max_legal_moves * 6,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55) + global features (1) + move features (max_legal_moves × 6). Default board (16x17) with 1000 max moves gives 6383. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). The 6 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `jumping` (bool), `prone` (bool). Unused slots (index >= n_legal_moves) are zero-padded.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
-- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 10x WinLoss). DamageDelta weights internal structure damage at 2x armor. LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2).
+- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 10x WinLoss). DamageDelta weights internal structure damage at 2x armor. LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage scores how well each side's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages, then rewards the difference (RL quality − enemy quality).
 
 ## Dependencies on `../megamek` Repo
 
