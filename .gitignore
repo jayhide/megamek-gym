@@ -20,3 +20,4 @@ dist/
 
 # Training runs (TensorBoard logs, checkpoints)
 runs/
+inspected_games/
