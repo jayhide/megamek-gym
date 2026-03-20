@@ -143,6 +143,11 @@ if __name__ == "__main__":
         [f"|{key}|{value}|" for key, value in vars(args).items()]
     ))
 
+    # Resolve classpath once in the main process before spawning workers.
+    # Workers read from the cached file, avoiding concurrent Gradle races.
+    from megamek_gym.java_process import JavaProcess
+    JavaProcess.warmup_classpath(args.megamek_dir)
+
     envs = gym.vector.AsyncVectorEnv(
       [make_env(i, args) for i in range(args.num_envs)],
       autoreset_mode="SameStep",

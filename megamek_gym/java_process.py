@@ -77,12 +77,27 @@ class JavaProcess:
 
     @classmethod
     def _resolve_classpath(cls, megamek_dir: Path) -> str:
-        """Resolve the runtime classpath via Gradle (cached after first call)."""
+        """Resolve the runtime classpath via Gradle (cached after first call).
+
+        Uses an on-disk cache file (rl_classpath.txt) so that worker processes
+        spawned by AsyncVectorEnv can skip Gradle entirely if the main process
+        already resolved it via warmup_classpath().
+        """
         if cls._cached_classpath is not None:
             return cls._cached_classpath
 
-        init_script = Path(__file__).parent.parent / "scripts" / "write_classpath.init.gradle"
         cp_file = megamek_dir / "megamek" / "rl_classpath.txt"
+
+        # If the file already exists (e.g. main process ran warmup_classpath),
+        # use it directly without invoking Gradle.
+        if cp_file.exists():
+            classpath = cp_file.read_text().strip()
+            if classpath:
+                cls._cached_classpath = classpath
+                logger.info("Classpath loaded from cache (%d entries)", classpath.count(":") + 1)
+                return classpath
+
+        init_script = Path(__file__).parent.parent / "scripts" / "write_classpath.init.gradle"
 
         logger.info("Resolving classpath via Gradle (one-time)...")
         result = subprocess.run(
@@ -111,6 +126,16 @@ class JavaProcess:
         cls._cached_classpath = classpath
         logger.info("Classpath resolved (%d entries)", classpath.count(":") + 1)
         return classpath
+
+    @classmethod
+    def warmup_classpath(cls, megamek_dir: str | Path) -> str:
+        """Resolve and cache the classpath in the main process.
+
+        Call this before spawning AsyncVectorEnv workers to avoid
+        concurrent Gradle invocations (which race on sentry-cli).
+        Returns the classpath string for passing to workers.
+        """
+        return cls._resolve_classpath(Path(megamek_dir).resolve())
 
     def start(self) -> None:
         classpath = self._resolve_classpath(self.megamek_dir)

@@ -27,7 +27,7 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
 
 - **Observation space**: `Box(shape=(W*H + 110,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55). Default board (16x17) gives 382.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
-- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + 10x WinLoss)
+- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 10x WinLoss). DamageDelta weights internal structure damage at 2x armor. LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2).
 
 ## Dependencies on `../megamek` Repo
 
@@ -73,7 +73,7 @@ megamek_gym/
 ├── env.py               # MegaMekEnv — full Gymnasium.Env implementation
 ├── java_process.py      # JavaProcess — subprocess wrapper for Gradle launcher
 ├── observation.py       # Flattens variable JSON observations → fixed float array
-└── reward.py            # RewardFunction base class + DamageDelta, WinLoss, Composite
+└── reward.py            # RewardFunction base class + DamageDelta, LocationDestruction, WinLoss, Composite
 
 configs/
 └── default.yaml         # Default configuration (all params documented)
@@ -88,6 +88,7 @@ smoke_test_truncation.py # Tests max_game_rounds truncation (RL bot stands still
 perf_test.py             # Multi-env startup timing and diagnostics
 train_ppo.py             # CleanRL-style PPO training script
 eval.py                  # Evaluation script for trained checkpoints
+clean_saves.py           # Delete saved game files to reclaim disk space
 ```
 
 ## Configuration

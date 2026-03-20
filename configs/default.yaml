@@ -16,4 +16,4 @@ opponent_starting_pos: 6
 rl_deployment: false
 firing_strategy: princess
 step_timeout_seconds: 30
-max_game_rounds: 50
+max_game_rounds: 100
