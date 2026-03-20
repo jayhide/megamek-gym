@@ -15,23 +15,47 @@ class RewardFunction(ABC):
         ...
 
 
-def _total_hp(units: list[dict], owner_id: int) -> float:
-    """Sum armor + internal across all locations for units belonging to owner."""
+def _weighted_hp(units: list[dict], owner_id: int, internal_multiplier: float = 2.0) -> float:
+    """Sum weighted HP across all locations for units belonging to owner.
+
+    Internal structure damage is weighted by *internal_multiplier* (default 2x)
+    relative to armor/rear_armor (weight 1x) to reflect its greater tactical
+    significance.
+    """
     total = 0.0
     for u in units:
         if u["owner"] == owner_id:
             for loc in u.get("armor", []):
-                total += loc.get("armor", 0) + loc.get("internal", 0)
-                total += loc.get("rear_armor", 0)
+                total += loc.get("armor", 0) + loc.get("rear_armor", 0)
+                total += loc.get("internal", 0) * internal_multiplier
     return total
 
 
-class DamageDeltaReward(RewardFunction):
-    """Reward based on net damage dealt minus damage taken."""
+# Location weights for destruction bonus (BattleTech tactical significance)
+LOCATION_WEIGHTS: dict[str, float] = {
+    "CT": 1.0,   # Center torso — mech kill
+    "HD": 1.0,   # Head — pilot kill
+    "LT": 0.4,   # Side torso — loses arm + weapons
+    "RT": 0.4,
+    "LA": 0.2,   # Arms — weapon loss
+    "RA": 0.2,
+    "LL": 0.3,   # Legs — mobility kill
+    "RL": 0.3,
+}
 
-    def __init__(self, scale: float = 1.0, normalizer: float = 100.0):
+
+class DamageDeltaReward(RewardFunction):
+    """Reward based on net damage dealt minus damage taken.
+
+    Internal structure damage is weighted by *internal_multiplier* (default 2x)
+    relative to armor damage, reflecting its greater tactical significance.
+    """
+
+    def __init__(self, scale: float = 1.0, normalizer: float = 100.0,
+                 internal_multiplier: float = 2.0):
         self.scale = scale
         self.normalizer = normalizer
+        self.internal_multiplier = internal_multiplier
         self._prev_own: float | None = None
         self._prev_enemy: float | None = None
 
@@ -41,20 +65,15 @@ class DamageDeltaReward(RewardFunction):
             return 0.0
 
         rl_owner = self._rl_owner
-        own_hp = _total_hp(curr_obs.get("units", []), rl_owner)
-        enemy_hp = sum(
-            _total_hp(curr_obs.get("units", []), u["owner"])
-            for u in curr_obs.get("units", [])
-            if u["owner"] != rl_owner
-        ) if curr_obs.get("units") else 0.0
-        # Deduplicate: just compute enemy_hp directly
+        im = self.internal_multiplier
+        own_hp = _weighted_hp(curr_obs.get("units", []), rl_owner, im)
         enemy_hp = 0.0
         enemy_owners = set()
         for u in curr_obs.get("units", []):
             if u["owner"] != rl_owner:
                 enemy_owners.add(u["owner"])
         for eid in enemy_owners:
-            enemy_hp += _total_hp(curr_obs.get("units", []), eid)
+            enemy_hp += _weighted_hp(curr_obs.get("units", []), eid, im)
 
         if self._prev_own is None:
             self._prev_own = own_hp
@@ -125,6 +144,76 @@ class WinLossReward(RewardFunction):
         self._rl_owner = owner_id
 
 
+def _location_internals(units: list[dict], owner_id: int) -> dict[tuple[int, str], float]:
+    """Return {(unit_id, location_name): internal} for units belonging to owner."""
+    result = {}
+    for u in units:
+        if u["owner"] == owner_id:
+            uid = u["id"]
+            for loc in u.get("armor", []):
+                loc_name = loc.get("location", "")
+                result[(uid, loc_name)] = loc.get("internal", 0)
+    return result
+
+
+class LocationDestructionReward(RewardFunction):
+    """Bonus reward when a location's internal structure is fully destroyed.
+
+    Weighted by location tactical significance (CT/HD highest, arms lowest).
+    Rewards destroying enemy locations, penalises losing own locations.
+    """
+
+    def __init__(self, scale: float = 1.0,
+                 location_weights: dict[str, float] | None = None):
+        self.scale = scale
+        self.location_weights = location_weights or LOCATION_WEIGHTS
+        self._prev_own: dict[tuple[int, str], float] | None = None
+        self._prev_enemy: dict[tuple[int, str], float] | None = None
+
+    def compute(self, prev_obs: dict, curr_obs: dict, terminated: bool) -> float:
+        if terminated and not curr_obs.get("units"):
+            return 0.0
+
+        units = curr_obs.get("units", [])
+        rl_owner = self._rl_owner
+
+        own_locs = _location_internals(units, rl_owner)
+        enemy_locs: dict[tuple[int, str], float] = {}
+        for u in units:
+            if u["owner"] != rl_owner:
+                enemy_locs.update(_location_internals(units, u["owner"]))
+
+        if self._prev_own is None:
+            self._prev_own = own_locs
+            self._prev_enemy = enemy_locs
+            return 0.0
+
+        reward = 0.0
+        # Enemy locations destroyed → positive reward
+        for key, internal in self._prev_enemy.items():
+            if internal > 0 and enemy_locs.get(key, internal) <= 0:
+                loc_name = key[1]
+                reward += self.location_weights.get(loc_name, 0.2) * self.scale
+
+        # Own locations destroyed → negative reward
+        for key, internal in self._prev_own.items():
+            if internal > 0 and own_locs.get(key, internal) <= 0:
+                loc_name = key[1]
+                reward -= self.location_weights.get(loc_name, 0.2) * self.scale
+
+        self._prev_own = own_locs
+        self._prev_enemy = enemy_locs
+        return reward
+
+    def reset(self) -> None:
+        self._prev_own = None
+        self._prev_enemy = None
+        self._rl_owner: int = -1
+
+    def set_rl_owner(self, owner_id: int) -> None:
+        self._rl_owner = owner_id
+
+
 class CompositeReward(RewardFunction):
     """Weighted sum of multiple reward functions."""
 
@@ -132,6 +221,7 @@ class CompositeReward(RewardFunction):
         if components is None:
             components = [
                 (DamageDeltaReward(), 1.0),
+                (LocationDestructionReward(), 1.0),
                 (WinLossReward(), 10.0),
             ]
         self.components = components
