@@ -22,10 +22,8 @@ import random
 import numpy as np
 import gymnasium as gym
 
+from megamek_gym.agent import load_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
-
-
-OUTCOME_MAP = {1: "WIN", -1: "LOSS", 0: "DRAW"}
 
 
 def parse_args():
@@ -243,39 +241,17 @@ def main():
 
     output_dir = Path(args.output_dir)
 
-    # Load trained policy if provided
+    env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
+
+    # Load trained policy if provided (after env creation so dimensions are known)
     agent = None
     device = None
     if args.checkpoint:
-        import torch
-        from train_ppo import Agent
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        checkpoint = torch.load(args.checkpoint, map_location=device)
-        saved_args = checkpoint.get("args", {})
-        obs_size = saved_args.get("obs_size", 382)
-        action_size = saved_args.get("action_size", 1000)
-
-        agent = Agent(obs_size, action_size).to(device)
-        agent.load_state_dict(checkpoint["model"])
-        agent.eval()
-        print(f"Loaded checkpoint: {args.checkpoint}")
-        print(f"  global_step={checkpoint.get('global_step', '?')}, deterministic={args.deterministic}")
-
-    env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
-
-    # If checkpoint provided, update agent dimensions from env
-    if agent is not None:
-        import torch
-        from train_ppo import Agent
-
         obs_size = env.observation_space.shape[0]
         action_size = env.action_space.n
-        if obs_size != agent.actor[0].in_features or action_size != agent.actor[-1].out_features:
-            checkpoint = torch.load(args.checkpoint, map_location=device)
-            agent = Agent(obs_size, action_size).to(device)
-            agent.load_state_dict(checkpoint["model"])
-            agent.eval()
+        agent, checkpoint, device = load_agent(args.checkpoint, obs_size, action_size)
+        print(f"Loaded checkpoint: {args.checkpoint}")
+        print(f"  global_step={checkpoint.get('global_step', '?')}, deterministic={args.deterministic}")
 
     print(f"Running {args.num_games} games, saves → {output_dir}/")
     print(f"  config: {args.config or 'defaults'}")
@@ -296,17 +272,7 @@ def main():
 
         while not done:
             if agent is not None:
-                import torch
-                obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
-                mask_t = torch.tensor(info["action_mask"], dtype=torch.bool).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    if args.deterministic:
-                        logits = agent.actor(obs_t)
-                        logits = logits.masked_fill(~mask_t, -1e8)
-                        action = logits.argmax(dim=1).item()
-                    else:
-                        action, _, _, _ = agent.get_action_and_value(obs_t, mask_t)
-                        action = action.item()
+                action = select_action(agent, obs, info["action_mask"], device, args.deterministic)
             else:
                 action = np.random.randint(0, info.get("n_legal_moves", 1))
 

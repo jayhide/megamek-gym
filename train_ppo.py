@@ -15,6 +15,7 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
+from megamek_gym.agent import Agent
 from megamek_gym.config import MegaMekConfig
 
 
@@ -42,38 +43,6 @@ def make_env(env_index, args):
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
     return thunk
-
-
-class Agent(nn.Module):
-    def __init__(self, obs_size, action_size):
-        super().__init__()
-        self.critic = nn.Sequential(
-            nn.Linear(obs_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-        )
-        self.actor = nn.Sequential(
-            nn.Linear(obs_size, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, action_size),
-        )
-
-    def get_value(self, obs):
-        return self.critic(obs)
-
-    def get_action_and_value(self, obs, action_mask, action=None):
-        logits = self.actor(obs)
-        invalid_mask = ~action_mask
-        logits = logits.masked_fill(invalid_mask, -1e8)
-
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.get_value(obs)
 
 
 def parse_args():
@@ -178,7 +147,13 @@ if __name__ == "__main__":
             optimizer.load_state_dict(checkpoint["optimizer"])
             global_step = checkpoint["global_step"]
             start_update = checkpoint["update"] + 1
+            total_games = checkpoint.get("total_games", 0)
+            total_wins = checkpoint.get("total_wins", 0)
+            total_losses = checkpoint.get("total_losses", 0)
+            total_draws = checkpoint.get("total_draws", 0)
+            total_crashes = checkpoint.get("total_crashes", 0)
             print(f"Resumed from {args.resume} at update {start_update}, global_step {global_step}")
+            print(f"  Restored stats: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes})")
         else:
             start_update = 1
 
@@ -218,7 +193,8 @@ if __name__ == "__main__":
         recent_returns = []
         recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
         recent_lengths = []
-        total_games, total_wins, total_losses, total_draws, total_crashes = 0, 0, 0, 0, 0
+        if not args.resume:
+            total_games, total_wins, total_losses, total_draws, total_crashes = 0, 0, 0, 0, 0
         rollout_n_legal = []
 
         for update in range(start_update, num_updates + 1):
@@ -433,6 +409,11 @@ if __name__ == "__main__":
                     "global_step": global_step,
                     "update": update,
                     "args": vars(args),
+                    "total_games": total_games,
+                    "total_wins": total_wins,
+                    "total_losses": total_losses,
+                    "total_draws": total_draws,
+                    "total_crashes": total_crashes,
                 }
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/step_{global_step}.pt")
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/latest.pt")

@@ -6,14 +6,16 @@ import numpy as np
 import torch
 import gymnasium as gym
 
+from megamek_gym.agent import Agent, load_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
-from train_ppo import Agent
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent in MegaMek")
 
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to .pt checkpoint")
+    parser.add_argument("--random", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+                        help="Use random policy (uniform over legal moves) as baseline")
     parser.add_argument("--num-episodes", type=int, default=10)
     parser.add_argument("--deterministic", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
     parser.add_argument("--megamek-dir", type=str, default="../megamek")
@@ -23,22 +25,12 @@ def parse_args():
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
     parser.add_argument("--verbose", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
 
-    return parser.parse_args()
-
-
-def detect_result(info):
-    """Determine WIN/LOSS/DRAW from terminal info dict."""
-    rl = info.get("rl_unit")
-    enemy = info.get("enemy_unit")
-
-    rl_alive = rl is not None and not rl.get("destroyed", False) and not rl.get("retreated", False)
-    enemy_alive = enemy is not None and not enemy.get("destroyed", False) and not enemy.get("retreated", False)
-
-    if rl_alive and not enemy_alive:
-        return "WIN"
-    elif not rl_alive and enemy_alive:
-        return "LOSS"
-    return "DRAW"
+    args = parser.parse_args()
+    if not args.random and args.checkpoint is None:
+        parser.error("Either --checkpoint or --random is required")
+    if args.random and args.checkpoint is not None:
+        parser.error("Cannot use both --checkpoint and --random")
+    return args
 
 
 if __name__ == "__main__":
@@ -50,12 +42,6 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # Load checkpoint
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-    saved_args = checkpoint.get("args", {})
-    obs_size = saved_args.get("obs_size", 382)
-    action_size = saved_args.get("action_size", 1000)
-
     # Create environment
     cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
     cfg.megamek_dir = args.megamek_dir
@@ -63,19 +49,19 @@ if __name__ == "__main__":
     cfg.env_index = 0
     env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
 
-    # Infer dimensions from env
     obs_size = env.observation_space.shape[0]
     action_size = env.action_space.n
 
-    # Load agent
-    agent = Agent(obs_size, action_size).to(device)
-    agent.load_state_dict(checkpoint["model"])
-    agent.eval()
-
-    print(f"Loaded checkpoint: {args.checkpoint}")
-    print(f"  global_step={checkpoint.get('global_step', '?')}, update={checkpoint.get('update', '?')}")
-    print(f"  obs_size={obs_size}, action_size={action_size}")
-    print(f"  deterministic={args.deterministic}, num_episodes={args.num_episodes}")
+    if args.random:
+        agent = None
+        print(f"Random baseline (uniform over legal moves)")
+        print(f"  num_episodes={args.num_episodes}")
+    else:
+        agent, checkpoint, device = load_agent(args.checkpoint, obs_size, action_size, device=device)
+        print(f"Loaded checkpoint: {args.checkpoint}")
+        print(f"  global_step={checkpoint.get('global_step', '?')}, update={checkpoint.get('update', '?')}")
+        print(f"  obs_size={obs_size}, action_size={action_size}")
+        print(f"  deterministic={args.deterministic}, num_episodes={args.num_episodes}")
     print()
 
     # Run evaluation episodes
@@ -90,17 +76,11 @@ if __name__ == "__main__":
         episode_length = 0
 
         while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
-            mask_tensor = torch.tensor(info["action_mask"], dtype=torch.bool).unsqueeze(0).to(device)
-
-            with torch.no_grad():
-                if args.deterministic:
-                    logits = agent.actor(obs_tensor)
-                    logits = logits.masked_fill(~mask_tensor, -1e8)
-                    action = logits.argmax(dim=1).item()
-                else:
-                    action, _, _, _ = agent.get_action_and_value(obs_tensor, mask_tensor)
-                    action = action.item()
+            if args.random:
+                n_legal = info.get("n_legal_moves", 0)
+                action = np.random.randint(0, max(n_legal, 1))
+            else:
+                action = select_action(agent, obs, info["action_mask"], device, args.deterministic)
 
             obs, reward, terminated, truncated, info = env.step(action)
             episode_return += reward
@@ -110,7 +90,7 @@ if __name__ == "__main__":
             if args.verbose:
                 print(f"  step {episode_length}: action={action}, reward={reward:.4f}")
 
-        result = detect_result(info)
+        result = OUTCOME_MAP.get(info.get("game_outcome", 0), "DRAW")
         returns.append(episode_return)
         lengths.append(episode_length)
         results.append(result)

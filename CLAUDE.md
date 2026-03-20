@@ -69,6 +69,7 @@ Newline-delimited JSON over TCP (default port 9999):
 ```
 megamek_gym/
 ├── __init__.py          # Gymnasium env registration (MegaMekGym/MegaMek-v0)
+├── agent.py             # Agent nn.Module, checkpoint loading, action selection utilities
 ├── config.py            # MegaMekConfig dataclass with YAML save/load
 ├── env.py               # MegaMekEnv — full Gymnasium.Env implementation
 ├── java_process.py      # JavaProcess — subprocess wrapper for Gradle launcher
@@ -88,7 +89,7 @@ smoke_test_truncation.py # Tests max_game_rounds truncation (RL bot stands still
 perf_test.py             # Multi-env startup timing and diagnostics
 train_ppo.py             # CleanRL-style PPO training script
 eval.py                  # Evaluation script for trained checkpoints
-clean_saves.py           # Delete saved game files to reclaim disk space
+clean_saves.py           # Delete training artifacts (saves, run dirs, logs, heap dumps)
 ```
 
 ## Configuration
@@ -141,6 +142,9 @@ tensorboard --logdir runs/
 ```bash
 poetry run python eval.py --checkpoint runs/megamek-ppo__1__*/checkpoints/latest.pt --num-episodes 10
 poetry run python eval.py --checkpoint path/to/checkpoint.pt --deterministic  # greedy policy
+
+# Random baseline (uniform over legal moves)
+poetry run python eval.py --random --num-episodes 10
 ```
 
 **Run directory structure:**
