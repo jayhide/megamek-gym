@@ -1,67 +1,128 @@
 #!/usr/bin/env python3
-"""Delete MegaMek saved game files to reclaim disk space."""
+"""Delete MegaMek training artifacts to reclaim disk space.
+
+Cleans: savegames, run_* directories, Java/GC logs, and heap dumps.
+By default everything is cleaned; use --keep-* flags to preserve categories.
+"""
 
 import argparse
 import shutil
 from pathlib import Path
 
 
+def _file_size(path: Path) -> int:
+    """Return file size, or 0 if stat fails (e.g. broken symlink)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _delete_file(path: Path, dry_run: bool) -> int:
+    """Delete a single file. Returns bytes freed."""
+    size = _file_size(path)
+    if dry_run:
+        print(f"  would delete {path}")
+    else:
+        path.unlink()
+    return size
+
+
+def _delete_dir(path: Path, dry_run: bool) -> int:
+    """Delete a directory tree. Returns bytes freed."""
+    size = sum(_file_size(f) for f in path.rglob("*") if f.is_file())
+    if dry_run:
+        print(f"  would remove {path}/ ({size / 1024 / 1024:.1f} MB)")
+    else:
+        shutil.rmtree(path)
+    return size
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Clean MegaMek save files")
-    parser.add_argument("--megamek-dir", default="../megamek", help="Path to megamek repo (default: ../megamek)")
-    parser.add_argument("--run-dirs", action="store_true", help="Also remove entire run_* directories (logs, data, etc.)")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be deleted without deleting")
+    parser = argparse.ArgumentParser(
+        description="Clean MegaMek training artifacts (saves, logs, run dirs, heap dumps)"
+    )
+    parser.add_argument("--megamek-dir", default="../megamek",
+                        help="Path to megamek repo (default: ../megamek)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would be deleted without deleting")
+    parser.add_argument("--keep-saves", action="store_true",
+                        help="Keep savegame files (*.sav.gz)")
+    parser.add_argument("--keep-run-dirs", action="store_true",
+                        help="Keep run_* directories (game logs, per-port data)")
+    parser.add_argument("--keep-logs", action="store_true",
+                        help="Keep Java logs, GC logs, and heap dumps")
     args = parser.parse_args()
 
-    base = Path(args.megamek_dir) / "megamek"
+    megamek_dir = Path(args.megamek_dir)
+    base = megamek_dir / "megamek"
     if not base.is_dir():
         print(f"Error: {base} not found")
         return 1
 
-    total_bytes = 0
-    total_files = 0
+    categories = {}  # name -> (bytes, count)
 
-    # Delete .sav.gz files from shared savegames dir
-    shared_dir = base / "savegames"
-    if shared_dir.is_dir():
-        for f in shared_dir.glob("*.sav.gz"):
-            size = f.stat().st_size
-            if args.dry_run:
-                print(f"  would delete {f}")
-            else:
-                f.unlink()
-            total_bytes += size
-            total_files += 1
+    # --- Java stderr logs (in megamek_dir, not megamek/megamek/) ---
+    if not args.keep_logs:
+        bytes_freed = 0
+        count = 0
+        for f in sorted(megamek_dir.glob("rl_java_*.log*")):
+            if f.is_file():
+                bytes_freed += _delete_file(f, args.dry_run)
+                count += 1
+        if count:
+            categories["Java logs"] = (bytes_freed, count)
 
-    # Handle run_* directories
-    run_dirs = sorted(base.glob("run_*"))
-    for run_dir in run_dirs:
-        if not run_dir.is_dir():
-            continue
-        if args.run_dirs:
-            size = sum(f.stat().st_size for f in run_dir.rglob("*") if f.is_file())
-            if args.dry_run:
-                print(f"  would remove {run_dir}/ ({size / 1024 / 1024:.1f} MB)")
-            else:
-                shutil.rmtree(run_dir)
-            total_bytes += size
-            total_files += 1  # count as one unit
-        else:
-            save_dir = run_dir / "savegames"
-            if not save_dir.is_dir():
-                continue
-            for f in save_dir.glob("*.sav.gz"):
-                size = f.stat().st_size
-                if args.dry_run:
-                    print(f"  would delete {f}")
-                else:
-                    f.unlink()
-                total_bytes += size
-                total_files += 1
+    # --- GC logs and heap dumps (in megamek/megamek/) ---
+    if not args.keep_logs:
+        bytes_freed = 0
+        count = 0
+        for f in sorted(base.glob("rl_gc.log*")):
+            if f.is_file():
+                bytes_freed += _delete_file(f, args.dry_run)
+                count += 1
+        heap = base / "rl_heapdump.hprof"
+        if heap.is_file():
+            bytes_freed += _delete_file(heap, args.dry_run)
+            count += 1
+        if count:
+            categories["GC logs / heap dumps"] = (bytes_freed, count)
 
-    mb = total_bytes / 1024 / 1024
+    # --- Run directories ---
+    if not args.keep_run_dirs:
+        bytes_freed = 0
+        count = 0
+        for run_dir in sorted(base.glob("run_*")):
+            if run_dir.is_dir():
+                bytes_freed += _delete_dir(run_dir, args.dry_run)
+                count += 1
+        if count:
+            categories["run_* directories"] = (bytes_freed, count)
+
+    # --- Shared savegames ---
+    if not args.keep_saves:
+        bytes_freed = 0
+        count = 0
+        shared_dir = base / "savegames"
+        if shared_dir.is_dir():
+            for f in sorted(shared_dir.glob("*.sav.gz")):
+                bytes_freed += _delete_file(f, args.dry_run)
+                count += 1
+        if count:
+            categories["Savegames"] = (bytes_freed, count)
+
+    # --- Summary ---
+    total_bytes = sum(b for b, _ in categories.values())
+    total_items = sum(c for _, c in categories.values())
     action = "Would free" if args.dry_run else "Freed"
-    print(f"{action} {mb:.1f} MB ({total_files} items)")
+
+    if categories:
+        print()
+        for name, (b, c) in categories.items():
+            print(f"  {name}: {b / 1024 / 1024:.1f} MB ({c} items)")
+        print(f"\n{action} {total_bytes / 1024 / 1024:.1f} MB total ({total_items} items)")
+    else:
+        print("Nothing to clean.")
     return 0
 
 

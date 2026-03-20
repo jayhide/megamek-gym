@@ -142,6 +142,10 @@ class MegaMekEnv(gymnasium.Env):
 
         # Read first observation from new game
         raw_obs = self._read_obs()
+        logger.debug(
+            "[port:%d] First obs after reset: keys=%s, phase=%s, terminated=%s",
+            self._port, list(raw_obs.keys()), raw_obs.get("phase"), raw_obs.get("terminated"),
+        )
 
         t_done = time.monotonic()
         self._reset_timing = {
@@ -249,8 +253,22 @@ class MegaMekEnv(gymnasium.Env):
         """Common logic for processing the first observation after any reset."""
         cfg = self.config
 
+        if raw_obs.get("terminated", False):
+            raise ConnectionError(
+                f"First obs after reset is terminal (phase={raw_obs.get('phase')}), "
+                f"game likely crashed on startup"
+            )
+
+        active_id = raw_obs.get("active_entity_id")
+        if active_id is None:
+            raise KeyError(
+                f"Missing 'active_entity_id' in observation "
+                f"(phase={raw_obs.get('phase')}, terminated={raw_obs.get('terminated')}, "
+                f"keys={list(raw_obs.keys())})"
+            )
+
         self._rl_owner_id = identify_rl_owner(
-            raw_obs, raw_obs["active_entity_id"]
+            raw_obs, active_id
         )
 
         self.reward_fn.reset()

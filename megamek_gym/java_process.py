@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,13 +28,15 @@ def _set_pdeathsig():
 
 # JVM options matching rlJvmOptions in megamek/build.gradle
 _JVM_OPTIONS = [
-    "-Xmx1536m",
+    "-Xmx2048m",
     "--add-opens", "java.base/java.util=ALL-UNNAMED",
     "--add-opens", "java.base/java.util.concurrent=ALL-UNNAMED",
     "-Dlog4j2.configurationFile=mmconf/log4j2-rl.xml",
     "-XX:+ExitOnOutOfMemoryError",
     "-XX:+HeapDumpOnOutOfMemoryError",
     "-XX:HeapDumpPath=rl_heapdump.hprof",
+    "-XX:+UnlockDiagnosticVMOptions",
+    "-XX:GCLockerRetryAllocationCount=100",
     "-Xlog:gc*:file=rl_gc.log:time,level,tags",
 ]
 
@@ -162,6 +165,11 @@ class JavaProcess:
             *args,
         ]
         log_path = self.megamek_dir / f"rl_java_{self.port}.log"
+        if log_path.exists():
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            old_path = log_path.with_name(f"rl_java_{self.port}_{ts}.log")
+            log_path.rename(old_path)
+            logger.info("Preserved old Java log as %s", old_path.name)
         logger.info("Starting JVM directly on port %d (log: %s)", self.port, log_path)
         self._stderr_file = open(log_path, "w")
         # Each JVM gets its own CWD to avoid shared filesystem contention
