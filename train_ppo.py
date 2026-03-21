@@ -57,14 +57,14 @@ def parse_args():
     # MegaMek environment
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--megamek-dir", type=str, default="../megamek")
-    parser.add_argument("--num-envs", type=int, default=4)
+    parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--port-base", type=int, default=9999)
     parser.add_argument("--stagger-delay", type=float, default=3.0,
                         help="Seconds between each env startup (0 to disable)")
 
     # PPO core
     parser.add_argument("--total-timesteps", type=int, default=500_000)
-    parser.add_argument("--num-steps", type=int, default=128)
+    parser.add_argument("--num-steps", type=int, default=256)
     parser.add_argument("--num-minibatches", type=int, default=4)
     parser.add_argument("--update-epochs", type=int, default=4)
 
@@ -152,8 +152,9 @@ if __name__ == "__main__":
             total_losses = checkpoint.get("total_losses", 0)
             total_draws = checkpoint.get("total_draws", 0)
             total_crashes = checkpoint.get("total_crashes", 0)
+            total_early_terms = checkpoint.get("total_early_terms", 0)
             print(f"Resumed from {args.resume} at update {start_update}, global_step {global_step}")
-            print(f"  Restored stats: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes})")
+            print(f"  Restored stats: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms})")
         else:
             start_update = 1
 
@@ -194,7 +195,7 @@ if __name__ == "__main__":
         recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
         recent_lengths = []
         if not args.resume:
-            total_games, total_wins, total_losses, total_draws, total_crashes = 0, 0, 0, 0, 0
+            total_games, total_wins, total_losses, total_draws, total_crashes, total_early_terms = 0, 0, 0, 0, 0, 0
         rollout_n_legal = []
 
         for update in range(start_update, num_updates + 1):
@@ -248,9 +249,12 @@ if __name__ == "__main__":
                         recent_rounds.append(rounds)
 
                         crashed = int(final_info.get("java_crash", np.zeros(args.num_envs))[i]) == 1
+                        early_termed = int(final_info.get("early_termination", np.zeros(args.num_envs))[i]) == 1
 
                         episodes_this_rollout += 1
                         total_games += 1
+                        if early_termed:
+                            total_early_terms += 1
                         if crashed:
                             total_crashes += 1
                             outcome_str = "CRASH"
@@ -276,6 +280,8 @@ if __name__ == "__main__":
                             writer.add_scalar("charts/win_rate", total_wins / total_games, global_step)
                         if crashed:
                             writer.add_scalar("charts/java_crashes", total_crashes, global_step)
+                        if early_termed:
+                            writer.add_scalar("charts/early_terminations", total_early_terms, global_step)
 
             t_rollout_end = time.time()
 
@@ -366,6 +372,10 @@ if __name__ == "__main__":
             rollout_s = t_rollout_end - t_rollout_start
             train_s = t_train_end - t_rollout_end
 
+            writer.add_scalar("charts/reward_mean", rewards_buf.mean().item(), global_step)
+            writer.add_scalar("charts/reward_std", rewards_buf.std().item(), global_step)
+            writer.add_scalar("charts/value_mean", values_buf.mean().item(), global_step)
+            writer.add_scalar("charts/value_std", values_buf.std().item(), global_step)
             writer.add_scalar("timing/rollout_seconds", rollout_s, global_step)
             writer.add_scalar("timing/train_seconds", train_s, global_step)
             writer.add_scalar("timing/episodes_per_rollout", episodes_this_rollout, global_step)
@@ -414,6 +424,7 @@ if __name__ == "__main__":
                     "total_losses": total_losses,
                     "total_draws": total_draws,
                     "total_crashes": total_crashes,
+                    "total_early_terms": total_early_terms,
                 }
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/step_{global_step}.pt")
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/latest.pt")
@@ -429,11 +440,11 @@ if __name__ == "__main__":
 
                 print(f"\n--- Summary (updates {summary_start}-{update}) ---")
                 if recent_returns:
-                    print(f"  Episodes: {n_recent} (W:{n_recent_w} L:{n_recent_l} D:{n_recent_d} C:{total_crashes} — {recent_wr:.1f}% win rate)")
+                    print(f"  Episodes: {n_recent} (W:{n_recent_w} L:{n_recent_l} D:{n_recent_d} C:{total_crashes} E:{total_early_terms} — {recent_wr:.1f}% win rate)")
                     print(f"  Mean return: {np.mean(recent_returns):.2f} | Mean length: {np.mean(recent_lengths):.0f} | Mean rounds: {np.mean(recent_rounds):.1f}")
                 else:
                     print(f"  Episodes: 0")
-                print(f"  Cumulative: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} — {cum_wr:.1f}%)")
+                print(f"  Cumulative: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms} — {cum_wr:.1f}%)")
                 print(f"  Explained variance:  {explained_var:.4f}")
                 print(f"  Learning rate:       {optimizer.param_groups[0]['lr']:.2e}")
                 print(f"  Elapsed:             {fmt_time(elapsed)}")
@@ -449,7 +460,7 @@ if __name__ == "__main__":
         sps = int(global_step / elapsed) if elapsed > 0 else 0
         final_wr = total_wins / total_games * 100 if total_games > 0 else 0
         print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
-        print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} — {final_wr:.1f}% win rate)")
+        print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms} — {final_wr:.1f}% win rate)")
 
     finally:
         writer.close()
