@@ -67,6 +67,7 @@ class MegaMekEnv(gymnasium.Env):
         self._legal_moves: list = []
         self._reset_timing: dict | None = None
         self._java_crashed: bool = False
+        self._reset_count: int = 0
 
     @property
     def _port(self) -> int:
@@ -111,7 +112,9 @@ class MegaMekEnv(gymnasium.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self._cleanup_saves()
+        self._reset_count += 1
+        if self._reset_count % 10 == 1:  # First reset + every 10th
+            self._cleanup_saves()
 
         # Try persistent reset if we have a live connection
         if (self._sock is not None and self._java is not None
@@ -190,6 +193,7 @@ class MegaMekEnv(gymnasium.Env):
             max_game_rounds=cfg.max_game_rounds,
             perf_log=cfg.perf_log,
             opponent_type=cfg.opponent_type,
+            force_gc=cfg.force_gc,
         )
         self._java.start()
 

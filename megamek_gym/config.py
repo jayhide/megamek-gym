@@ -44,6 +44,30 @@ class MegaMekConfig:
     max_game_rounds: int = 50
     perf_log: bool = False
     opponent_type: str = "princess"
+    force_gc: bool = False
+
+    # Training hyperparameters (used by train_ppo.py)
+    exp_name: str = "megamek-ppo"
+    seed: int = 1
+    cuda: bool = True
+    num_envs: int = 8
+    stagger_delay: float = 3.0
+    total_timesteps: int = 500_000
+    num_steps: int = 256
+    num_minibatches: int = 4
+    update_epochs: int = 4
+    learning_rate: float = 3e-4
+    anneal_lr: bool = True
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_coef: float = 0.2
+    clip_vloss: bool = False
+    ent_coef: float = 0.05
+    vf_coef: float = 1.0
+    max_grad_norm: float = 0.5
+    target_kl: float = 0.03
+    hidden_size: int = 512
+    save_interval: int = 50
 
     def __post_init__(self):
         # Validate that board dimensions can be resolved
