@@ -529,6 +529,62 @@ def armor_summary(unit: dict) -> str:
     )
 
 
+def extract_initiative(text: str) -> dict | None:
+    """Extract initiative rolls and first mover from save file XML.
+
+    Returns dict with:
+        rolls: {player_name: roll_value}
+        first_mover_name: name of the player who moves first
+        first_mover_id: player ID of the first mover
+    Or None if initiative data is not found.
+    """
+    # Build player ID -> name mapping (skip watcher/observer)
+    players = {}
+    for m in re.finditer(
+        r"<megamek\.common\.Player\s+id=\"\d+\">(.*?)</megamek\.common\.Player>",
+        text, re.DOTALL,
+    ):
+        block = m.group(1)
+        name_m = re.search(r"<name>(.*?)</name>", block)
+        id_m = re.search(r"<id>(\d+)</id>", block)
+        if not name_m or not id_m:
+            continue
+        pid = int(id_m.group(1))
+        name = name_m.group(1)
+        if name == "watcher" or pid == 0:
+            continue
+
+        # Get the last roll value (current round)
+        rolls_m = re.search(r"<rolls[^>]*>(.*?)</rolls>", block, re.DOTALL)
+        roll = None
+        if rolls_m:
+            ints = re.findall(r"<int>(-?\d+)</int>", rolls_m.group(1))
+            if ints:
+                roll = int(ints[-1])
+
+        players[pid] = {"name": name, "roll": roll}
+
+    if not players:
+        return None
+
+    # Determine first mover from turnVector
+    tv_m = re.search(r"<turnVector[^>]*>(.*?)</turnVector>", text, re.DOTALL)
+    first_mover_id = None
+    if tv_m:
+        pid_matches = re.findall(r"<playerId>(\d+)</playerId>", tv_m.group(1))
+        if pid_matches:
+            first_mover_id = int(pid_matches[0])
+
+    rolls = {p["name"]: p["roll"] for p in players.values() if p["roll"] is not None}
+    first_mover_name = players[first_mover_id]["name"] if first_mover_id in players else None
+
+    return {
+        "rolls": rolls,
+        "first_mover_name": first_mover_name,
+        "first_mover_id": first_mover_id,
+    }
+
+
 def parse_save(path: Path) -> dict:
     """Parse a .sav.gz file, return round info with units and reports."""
     # Extract round number from filename
@@ -541,12 +597,14 @@ def parse_save(path: Path) -> dict:
 
     units = extract_units(text)
     reports = extract_reports(text)
+    initiative = extract_initiative(text)
 
     return {
         "round": round_num,
         "units": units,
         "reports": reports,
         "n_reports": len(reports),
+        "initiative": initiative,
     }
 
 
@@ -623,6 +681,16 @@ def main():
         prev_save = saves[i - 1] if i > 0 else None
 
         print(bold(f"\n--- Round {round_num} ---"))
+
+        # Initiative
+        init = save.get("initiative")
+        if init and init["rolls"]:
+            rolls = init["rolls"]
+            first = init.get("first_mover_name")
+            roll_parts = [f"{name}={roll}" for name, roll in rolls.items()]
+            first_str = f"{first} moves first" if first else ""
+            roll_str = ", ".join(roll_parts)
+            print(f"  {dim(f'Initiative: {first_str} (rolled {roll_str})')}")
 
         # Movement diff
         if prev_save:

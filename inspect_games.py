@@ -99,7 +99,7 @@ def print_game_transcript(game_dir, step_log, outcome="UNKNOWN", verbose=False):
         parse_save, get_round_reports, diff_units,
         decode_combat_reports, decode_damage_reports,
         determine_end_condition,
-        armor_summary, bold, cyan, green, yellow, red,
+        armor_summary, bold, cyan, green, yellow, red, dim,
     )
 
     save_files = sorted(
@@ -126,6 +126,16 @@ def print_game_transcript(game_dir, step_log, outcome="UNKNOWN", verbose=False):
         prev_save = saves[i - 1] if i > 0 else None
 
         print(bold(f"\n--- Round {round_num} ---"))
+
+        # Initiative
+        init = save.get("initiative")
+        if init and init["rolls"]:
+            rolls = init["rolls"]
+            first = init.get("first_mover_name")
+            roll_parts = [f"{name}={roll}" for name, roll in rolls.items()]
+            first_str = f"{first} moves first" if first else ""
+            roll_str = ", ".join(roll_parts)
+            print(f"  {dim(f'Initiative: {first_str} (rolled {roll_str})')}")
 
         # Movement diff
         if prev_save:
@@ -169,8 +179,13 @@ def print_game_transcript(game_dir, step_log, outcome="UNKNOWN", verbose=False):
                 # MegaMek calls the end-of-game phase "VICTORY" regardless of who won;
                 # rename to avoid confusion
                 phase = "GAME_END" if s["phase"] == "VICTORY" else s["phase"]
+                flags = ""
+                if s.get("early_termination"):
+                    flags += " [EARLY_TERM]"
+                if s.get("java_crash"):
+                    flags += " [JAVA_CRASH]"
                 print(f"    {phase}: action {s['action']}/{s['n_legal_moves']} legal"
-                      f"  ->  reward {r_str}")
+                      f"  ->  reward {r_str}{flags}")
                 # Show per-component reward breakdown
                 details = s.get("reward_details", [])
                 nonzero = [(name, raw, weighted) for name, raw, weighted in details
@@ -314,6 +329,8 @@ def main():
                 "reward": reward,
                 "reward_details": reward_details,
                 "cumulative_return": episode_return,
+                "early_termination": info.get("early_termination", 0),
+                "java_crash": info.get("java_crash", 0),
             })
 
         outcome = OUTCOME_MAP.get(info.get("game_outcome", 0), "UNKNOWN")
