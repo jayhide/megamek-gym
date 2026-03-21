@@ -17,10 +17,12 @@ Runs in ~2-3 minutes. Exit code 0 if all tests pass, 1 if any fail.
 """
 
 import argparse
+import re
 import signal
 import sys
 import time
 import traceback
+from pathlib import Path
 
 import gymnasium  # noqa: F401
 import numpy as np
@@ -48,6 +50,25 @@ signal.signal(signal.SIGALRM, _alarm_handler)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def read_peak_memory(megamek_dir, port):
+    """Read peak JVM memory from rl_java_{port}.log [rl-mem] lines."""
+    log_path = Path(megamek_dir) / f"rl_java_{port}.log"
+    if not log_path.exists():
+        return None
+    peak_used = 0
+    max_heap = 0
+    for line in log_path.read_text().splitlines():
+        m = re.search(r"\[rl-mem\].*used=(\d+)MB.*max=(\d+)MB", line)
+        if m:
+            used = int(m.group(1))
+            heap = int(m.group(2))
+            peak_used = max(peak_used, used)
+            max_heap = max(max_heap, heap)
+    if peak_used > 0:
+        return peak_used, max_heap
+    return None
+
 
 def run_episode(env, max_steps=500, action_fn=None, verbose=False):
     """Run one episode. Returns (steps, terminated, truncated, final_info, obs_shape)."""
@@ -95,6 +116,7 @@ def test_basic_episode(megamek_dir, port, verbose):
         max_game_rounds=50,
         firing_strategy="naive",
         max_rotating_round_saves=0,
+        perf_log=True,
     )
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
@@ -127,6 +149,7 @@ def test_truncation(megamek_dir, port, verbose):
         max_game_rounds=3,
         firing_strategy="naive",
         max_rotating_round_saves=0,
+        perf_log=True,
     )
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
@@ -163,6 +186,7 @@ def test_termination(megamek_dir, port, verbose):
         java_timeout_minutes=5,
         firing_strategy="naive",
         max_rotating_round_saves=0,
+        perf_log=True,
     )
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
@@ -194,6 +218,7 @@ def test_persistent_reset(megamek_dir, port, verbose):
         max_game_rounds=3,
         firing_strategy="naive",
         max_rotating_round_saves=0,
+        perf_log=True,
     )
 
     num_episodes = 3
@@ -271,7 +296,9 @@ def main():
 
         elapsed = time.monotonic() - t0
         status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {detail} ({elapsed:.1f}s)")
+        mem = read_peak_memory(args.megamek_dir, port)
+        mem_str = f" | JVM peak {mem[0]}MB/{mem[1]}MB" if mem else ""
+        print(f"  [{status}] {detail} ({elapsed:.1f}s{mem_str})")
         print()
         results.append((name, passed))
 
