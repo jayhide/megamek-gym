@@ -22,7 +22,7 @@ class MegaMekConfig:
     """Configuration for a MegaMek RL environment instance."""
 
     megamek_dir: str = "../megamek"
-    rl_unit: str = "Firestarter FS9-H"
+    rl_unit: str = "Commando COM-2D"
     opponent_unit: str = "Commando COM-2D"
     board: str = "Map Set 6/16x17 BattleForce 2"
     board_width: int | None = None
@@ -32,7 +32,7 @@ class MegaMekConfig:
     java_timeout_minutes: int = 10
     connection_retries: int = 60
     connection_retry_delay: float = 1.0
-    max_legal_moves: int = 1000
+    max_legal_moves: int = 400
     max_rotating_round_saves: int = 0
     paranoid_autosave: bool = False
     save_budget_mb: int = 1000
@@ -42,6 +42,8 @@ class MegaMekConfig:
     firing_strategy: str = "princess"
     step_timeout_seconds: int = 30
     max_game_rounds: int = 50
+    perf_log: bool = False
+    opponent_type: str = "princess"
 
     def __post_init__(self):
         # Validate that board dimensions can be resolved

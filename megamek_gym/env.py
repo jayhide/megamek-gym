@@ -188,6 +188,8 @@ class MegaMekEnv(gymnasium.Env):
             rl_deployment=cfg.rl_deployment,
             firing_strategy=cfg.firing_strategy,
             max_game_rounds=cfg.max_game_rounds,
+            perf_log=cfg.perf_log,
+            opponent_type=cfg.opponent_type,
         )
         self._java.start()
 
@@ -307,6 +309,32 @@ class MegaMekEnv(gymnasium.Env):
         terminated = raw_obs.get("terminated", False)
         truncated = raw_obs.get("truncated", False)
 
+        # Early termination: prone with destroyed leg(s) = unrecoverable
+        if not terminated and not truncated and self._check_early_termination(raw_obs):
+            logger.info(
+                "[port:%d] Early termination: RL unit is prone with destroyed leg(s)",
+                self._port,
+            )
+            # Send forfeit to Java so it can end the game cleanly
+            # and we can use persistent reset instead of cold restart
+            try:
+                forfeit_msg = json.dumps({"type": "forfeit"}) + "\n"
+                self._sock.sendall(forfeit_msg.encode("utf-8"))
+                terminal_obs = self._read_obs()  # read Java's terminal response
+                raw_obs = terminal_obs
+            except (BrokenPipeError, ConnectionError, OSError, Exception) as e:
+                logger.warning(
+                    "[port:%d] Forfeit exchange failed (%s), falling back to cold restart",
+                    self._port, e,
+                )
+                self._java_crashed = True  # fallback to cold restart
+            raw_obs["game_outcome"] = "LOSS"
+            raw_obs["terminated"] = True
+            terminated = True
+            early_term = True
+        else:
+            early_term = False
+
         prev_raw = self._last_raw_obs
         reward = self.reward_fn.compute(prev_raw, raw_obs, terminated)
 
@@ -327,6 +355,8 @@ class MegaMekEnv(gymnasium.Env):
             self._last_flat_obs = flat
 
         info = self._build_info(raw_obs)
+        if early_term:
+            info["early_termination"] = 1
         return flat, reward, terminated, truncated, info
 
     def _handle_crash(self, reason: str):
@@ -353,6 +383,25 @@ class MegaMekEnv(gymnasium.Env):
         info["java_crash"] = 1
         return self._last_flat_obs, 0.0, True, False, info
 
+    def _check_early_termination(self, raw_obs: dict) -> bool:
+        """Return True if RL unit is prone with at least one destroyed leg.
+
+        A mech that is prone with a destroyed leg cannot stand, making it
+        effectively immobilized.  Ending the episode early avoids wasting
+        training time on hopeless states.
+        """
+        units = raw_obs.get("units", [])
+        for unit in units:
+            if unit.get("owner") != self._rl_owner_id:
+                continue
+            if not unit.get("prone", False):
+                return False
+            for loc in unit.get("armor", []):
+                if loc.get("location") in ("LL", "RL") and loc.get("internal", 1) <= 0:
+                    return True
+            return False
+        return False
+
     def _build_info(self, raw_obs: dict) -> dict:
         # Gymnasium's AsyncVectorEnv._add_info cannot merge nested dicts/lists
         # across envs during auto-reset. Only include scalars and numpy arrays
@@ -377,6 +426,7 @@ class MegaMekEnv(gymnasium.Env):
             "game_outcome": game_outcome,
             "game_rounds": game_round,
             "java_crash": 0,
+            "early_termination": 0,
         }
         return info
 
