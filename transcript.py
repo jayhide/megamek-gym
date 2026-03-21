@@ -318,6 +318,19 @@ def extract_reports(text: str) -> list[dict]:
     return reports
 
 
+def _tag_name(entity_name: str, player_name: str | None) -> str:
+    """Append a short player tag to an entity name for disambiguation.
+
+    Strips HTML from both, then appends '(RLBot)' or '(Princess)' etc.
+    """
+    if not player_name:
+        return entity_name
+    player = strip_html(player_name).strip()
+    if not player:
+        return entity_name
+    return f"{entity_name} ({player})"
+
+
 def decode_combat_reports(reports: list[dict]) -> list[str]:
     """Decode weapon attacks from report entries into human-readable lines.
 
@@ -346,7 +359,8 @@ def decode_combat_reports(reports: list[dict]) -> list[str]:
         if mid == 3100:
             # Weapons fire header: [entity_name_html, player_name_html]
             if td:
-                current_attacker = extract_entity_name(td[0])
+                player = td[1] if len(td) >= 2 else None
+                current_attacker = _tag_name(extract_entity_name(td[0]), player)
             current_weapon = None
             current_target = None
             current_tohit = None
@@ -356,7 +370,8 @@ def decode_combat_reports(reports: list[dict]) -> list[str]:
             # Weapon attack: [weapon_name, target_html, target_player_html]
             if len(td) >= 2:
                 current_weapon = td[0]
-                current_target = extract_entity_name(td[1])
+                target_player = td[2] if len(td) >= 3 else None
+                current_target = _tag_name(extract_entity_name(td[1]), target_player)
             current_tohit = None
             current_roll = None
 
@@ -414,15 +429,32 @@ def decode_combat_reports(reports: list[dict]) -> list[str]:
 
 
 def decode_damage_reports(reports: list[dict]) -> list[str]:
-    """Extract damage reports (6065) into human-readable lines."""
+    """Extract damage reports (6065) into human-readable lines.
+
+    Uses surrounding combat reports (3100/3115) to determine which player
+    owns the damaged entity, since 6065 reports don't include player info.
+    """
     lines = []
+    # Track entity->player mapping from combat reports for disambiguation
+    entity_player_map: dict[str, str] = {}
     for r in reports:
-        if r["messageId"] == 6065 and len(r["tagData"]) >= 4:
-            td = r["tagData"]
+        mid = r["messageId"]
+        td = r["tagData"]
+        if mid == 3100 and len(td) >= 2:
+            # Attacker: td[0]=entity, td[1]=player
+            name = extract_entity_name(td[0])
+            entity_player_map[name] = td[1]
+        elif mid == 3115 and len(td) >= 3:
+            # Target: td[1]=entity, td[2]=player
+            name = extract_entity_name(td[1])
+            entity_player_map[name] = td[2]
+        elif mid == 6065 and len(td) >= 4:
             entity = extract_entity_name(td[0])
+            player = entity_player_map.get(entity)
+            tagged = _tag_name(entity, player)
             dmg = td[2]
             loc = td[3]
-            lines.append(f"    {entity} takes {dmg} damage to {loc}")
+            lines.append(f"    {tagged} takes {dmg} damage to {loc}")
     return lines
 
 
