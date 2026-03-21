@@ -47,7 +47,7 @@ def load_agent(checkpoint_path, obs_size, action_size, device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    hidden_size = checkpoint.get("args", {}).get("hidden_size", 512)
+    hidden_size = checkpoint.get("config", checkpoint.get("args", {})).get("hidden_size", 512)
     agent = Agent(obs_size, action_size, hidden_size=hidden_size).to(device)
     agent.load_state_dict(checkpoint["model"])
     agent.eval()

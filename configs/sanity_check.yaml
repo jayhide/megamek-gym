@@ -1,0 +1,29 @@
+megamek_dir: ../megamek
+rl_unit: Commando COM-2D
+opponent_unit: Commando COM-2D
+board: Map Set 6/16x17 BattleForce 2
+rl_port: 9999
+java_timeout_minutes: 5
+connection_retries: 60
+connection_retry_delay: 1.0
+max_legal_moves: 400
+max_rotating_round_saves: 0
+paranoid_autosave: false
+save_budget_mb: 1000
+rl_starting_pos: 2
+opponent_starting_pos: 6
+rl_deployment: false
+firing_strategy: naive
+step_timeout_seconds: 30
+max_game_rounds: 40
+
+# Training
+exp_name: sanity-check
+num_envs: 8
+stagger_delay: 3.0
+total_timesteps: 500000
+num_steps: 256
+hidden_size: 128
+ent_coef: 0.05
+learning_rate: 0.0003
+save_interval: 25

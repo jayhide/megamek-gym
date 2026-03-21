@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 from distutils.util import strtobool
 import logging
 import os
@@ -26,70 +27,84 @@ def fmt_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def make_env(env_index, args):
+def make_env(env_index, cfg):
     # Resolve megamek_dir to absolute path before entering the subprocess,
     # since AsyncVectorEnv may change the working directory.
-    megamek_dir = str(os.path.abspath(args.megamek_dir))
-    stagger_delay = args.stagger_delay
+    megamek_dir = str(os.path.abspath(cfg.megamek_dir))
+    stagger_delay = cfg.stagger_delay
     def thunk():
         delay = env_index * stagger_delay
         if delay > 0:
             time.sleep(delay)
-        cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
-        cfg.env_index = env_index
-        cfg.megamek_dir = megamek_dir
-        cfg.rl_port = args.port_base
-        env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
+        env_cfg = dataclasses.replace(cfg, env_index=env_index, megamek_dir=megamek_dir)
+        env = gym.make("MegaMekGym/MegaMek-v0", config=env_cfg)
         env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
     return thunk
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="PPO training for MegaMek")    
+# Mapping from CLI arg names to config field names.
+# Only entries where the names differ need to be listed;
+# matching names are handled automatically.
+_CLI_TO_CONFIG_RENAMES = {
+    "port_base": "rl_port",
+    "megamek_dir": "megamek_dir",
+}
 
-    # General
-    parser.add_argument("--exp-name", type=str, default="megamek-ppo")
-    parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+# CLI args that are session-specific and NOT backed by config.
+_SESSION_ONLY = {"config", "resume", "track"}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="PPO training for MegaMek")
+
+    # Session-only args (never saved to config)
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
 
-    # MegaMek environment
-    parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--megamek-dir", type=str, default="../megamek")
-    parser.add_argument("--num-envs", type=int, default=8)
-    parser.add_argument("--port-base", type=int, default=9999)
-    parser.add_argument("--stagger-delay", type=float, default=3.0,
+    # All config-backed args: default=None so we detect CLI overrides
+    parser.add_argument("--megamek-dir", type=str, default=None)
+    parser.add_argument("--port-base", type=int, default=None)
+    parser.add_argument("--exp-name", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=None, nargs="?", const=True)
+    parser.add_argument("--num-envs", type=int, default=None)
+    parser.add_argument("--stagger-delay", type=float, default=None,
                         help="Seconds between each env startup (0 to disable)")
-
-    # PPO core
-    parser.add_argument("--total-timesteps", type=int, default=500_000)
-    parser.add_argument("--num-steps", type=int, default=256)
-    parser.add_argument("--num-minibatches", type=int, default=4)
-    parser.add_argument("--update-epochs", type=int, default=4)
-
-    # PPO hyperparameters
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-coef", type=float, default=0.2)
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
-    parser.add_argument("--ent-coef", type=float, default=0.05)
-    parser.add_argument("--vf-coef", type=float, default=1.0)
-    parser.add_argument("--max-grad-norm", type=float, default=0.5)
-    parser.add_argument("--target-kl", type=float, default=0.03)
-
-    # Checkpointing
-    parser.add_argument("--hidden-size", type=int, default=512)
-    parser.add_argument("--save-interval", type=int, default=50)
-    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--total-timesteps", type=int, default=None)
+    parser.add_argument("--num-steps", type=int, default=None)
+    parser.add_argument("--num-minibatches", type=int, default=None)
+    parser.add_argument("--update-epochs", type=int, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=None, nargs="?", const=True)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--gae-lambda", type=float, default=None)
+    parser.add_argument("--clip-coef", type=float, default=None)
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=None, nargs="?", const=True)
+    parser.add_argument("--ent-coef", type=float, default=None)
+    parser.add_argument("--vf-coef", type=float, default=None)
+    parser.add_argument("--max-grad-norm", type=float, default=None)
+    parser.add_argument("--target-kl", type=float, default=None)
+    parser.add_argument("--hidden-size", type=int, default=None)
+    parser.add_argument("--save-interval", type=int, default=None)
 
     args = parser.parse_args()
-    args.batch_size = args.num_envs * args.num_steps
-    args.minibatch_size = args.batch_size // args.num_minibatches
-    return args
+
+    # Load base config
+    cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
+
+    # Apply CLI overrides: any non-None CLI value overwrites the config field
+    for cli_key, cli_val in vars(args).items():
+        if cli_key in _SESSION_ONLY or cli_val is None:
+            continue
+        config_key = _CLI_TO_CONFIG_RENAMES.get(cli_key, cli_key)
+        if hasattr(cfg, config_key):
+            setattr(cfg, config_key, cli_val)
+
+    return cfg, args
+
 
 _shutting_down = False
 
@@ -99,28 +114,34 @@ if __name__ == "__main__":
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    args = parse_args()
+    cfg, args = parse_args()
+    batch_size = cfg.num_envs * cfg.num_steps
+    minibatch_size = batch_size // cfg.num_minibatches
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.cuda
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    torch.backends.cudnn.deterministic = cfg.cuda
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
 
-    run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{cfg.exp_name}__{cfg.seed}__{int(time.time())}"
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n" + "\n".join(
-        [f"|{key}|{value}|" for key, value in vars(args).items()]
+        [f"|{key}|{value}|" for key, value in dataclasses.asdict(cfg).items()]
     ))
+
+    # Save resolved config for reproducibility
+    os.makedirs(f"runs/{run_name}", exist_ok=True)
+    cfg.save(f"runs/{run_name}/config.yaml")
 
     # Resolve classpath once in the main process before spawning workers.
     # Workers read from the cached file, avoiding concurrent Gradle races.
     from megamek_gym.java_process import JavaProcess
-    JavaProcess.warmup_classpath(args.megamek_dir)
+    JavaProcess.warmup_classpath(cfg.megamek_dir)
 
     envs = gym.vector.AsyncVectorEnv(
-      [make_env(i, args) for i in range(args.num_envs)],
+      [make_env(i, cfg) for i in range(cfg.num_envs)],
       autoreset_mode="SameStep",
     )
 
@@ -140,8 +161,8 @@ if __name__ == "__main__":
 
     try:  # try/finally to guarantee envs.close() on any exception
 
-        agent = Agent(envs.single_observation_space.shape[0], envs.single_action_space.n, hidden_size=args.hidden_size).to(device)
-        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        agent = Agent(envs.single_observation_space.shape[0], envs.single_action_space.n, hidden_size=cfg.hidden_size).to(device)
+        optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
         if args.resume:
             checkpoint = torch.load(args.resume, map_location=device)
@@ -161,13 +182,13 @@ if __name__ == "__main__":
             start_update = 1
 
         # Initialize Rollout
-        obs_buf = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-        actions_buf = torch.zeros((args.num_steps, args.num_envs)).to(device)
-        logprobs_buf = torch.zeros((args.num_steps, args.num_envs)).to(device)
-        rewards_buf = torch.zeros((args.num_steps, args.num_envs)).to(device)
-        dones_buf = torch.zeros((args.num_steps, args.num_envs)).to(device)
-        values_buf = torch.zeros((args.num_steps, args.num_envs)).to(device)
-        masks_buf = torch.zeros((args.num_steps, args.num_envs, envs.single_action_space.n), dtype=torch.bool).to(device)
+        obs_buf = torch.zeros((cfg.num_steps, cfg.num_envs) + envs.single_observation_space.shape).to(device)
+        actions_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+        logprobs_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+        rewards_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+        dones_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+        values_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+        masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, envs.single_action_space.n), dtype=torch.bool).to(device)
 
         # Start
         start_time = time.time()
@@ -176,22 +197,23 @@ if __name__ == "__main__":
 
         next_obs, info = envs.reset()
         next_obs = torch.Tensor(next_obs).to(device)
-        next_done = torch.zeros(args.num_envs).to(device)
+        next_done = torch.zeros(cfg.num_envs).to(device)
         next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
-        num_updates = args.total_timesteps // args.batch_size
+        num_updates = cfg.total_timesteps // batch_size
 
         print(f"\n{'='*60}")
-        print(f"  PPO Training — {args.exp_name}")
-        print(f"  Device: {device} | Envs: {args.num_envs} | Stagger: {args.stagger_delay}s")
+        print(f"  PPO Training — {cfg.exp_name}")
+        print(f"  Device: {device} | Envs: {cfg.num_envs} | Stagger: {cfg.stagger_delay}s")
         n_params = sum(p.numel() for p in agent.parameters())
-        print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n} | Hidden: {args.hidden_size} | Params: {n_params:,}")
-        print(f"  Timesteps: {args.total_timesteps:,} | Updates: {num_updates}")
-        print(f"  Batch: {args.batch_size} | Minibatch: {args.minibatch_size}")
-        print(f"  LR: {args.learning_rate} | Ent: {args.ent_coef} | Gamma: {args.gamma}")
+        print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n} | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
+        print(f"  Timesteps: {cfg.total_timesteps:,} | Updates: {num_updates}")
+        print(f"  Batch: {batch_size} | Minibatch: {minibatch_size}")
+        print(f"  LR: {cfg.learning_rate} | Ent: {cfg.ent_coef} | Gamma: {cfg.gamma}")
+        print(f"  Config: runs/{run_name}/config.yaml")
         print(f"  Java logs:")
-        for i in range(args.num_envs):
-            port = args.port_base + i
-            print(f"    env {i}: {args.megamek_dir}/rl_java_{port}.log")
+        for i in range(cfg.num_envs):
+            port = cfg.rl_port + i
+            print(f"    env {i}: {cfg.megamek_dir}/rl_java_{port}.log")
         print(f"{'='*60}\n")
 
         recent_returns = []
@@ -203,17 +225,17 @@ if __name__ == "__main__":
 
         for update in range(start_update, num_updates + 1):
 
-            if args.anneal_lr:
+            if cfg.anneal_lr:
                 frac = 1.0 - (update - 1) / num_updates
-                optimizer.param_groups[0]["lr"] = frac * args.learning_rate
+                optimizer.param_groups[0]["lr"] = frac * cfg.learning_rate
 
             t_rollout_start = time.time()
             episodes_this_rollout = 0
 
-            for step in range(0, args.num_steps):
+            for step in range(0, cfg.num_steps):
                 if step % 16 == 0:
-                    print(f"  rollout {update}: step {step}/{args.num_steps}", flush=True)
-                global_step += args.num_envs
+                    print(f"  rollout {update}: step {step}/{cfg.num_steps}", flush=True)
+                global_step += cfg.num_envs
                 obs_buf[step] = next_obs
                 dones_buf[step] = next_done
                 masks_buf[step] = next_mask
@@ -237,22 +259,22 @@ if __name__ == "__main__":
                 if "final_info" in info and "_final_info" in info:
                     final_info = info["final_info"]
                     final_mask = info["_final_info"]
-                    for i in range(args.num_envs):
+                    for i in range(cfg.num_envs):
                         if not final_mask[i]:
                             continue
                         # Extract per-env episode stats
                         ep_data = final_info.get("episode", {})
                         ep_return = float(ep_data.get("r", [0])[i]) if "r" in ep_data else 0.0
                         ep_len = int(ep_data.get("l", [0])[i]) if "l" in ep_data else 0
-                        outcome = int(final_info.get("game_outcome", np.zeros(args.num_envs))[i])
-                        rounds = int(final_info.get("game_rounds", np.zeros(args.num_envs))[i])
+                        outcome = int(final_info.get("game_outcome", np.zeros(cfg.num_envs))[i])
+                        rounds = int(final_info.get("game_rounds", np.zeros(cfg.num_envs))[i])
 
                         recent_returns.append(ep_return)
                         recent_lengths.append(ep_len)
                         recent_rounds.append(rounds)
 
-                        crashed = int(final_info.get("java_crash", np.zeros(args.num_envs))[i]) == 1
-                        early_termed = int(final_info.get("early_termination", np.zeros(args.num_envs))[i]) == 1
+                        crashed = int(final_info.get("java_crash", np.zeros(cfg.num_envs))[i]) == 1
+                        early_termed = int(final_info.get("early_termination", np.zeros(cfg.num_envs))[i]) == 1
 
                         episodes_this_rollout += 1
                         total_games += 1
@@ -293,15 +315,15 @@ if __name__ == "__main__":
                 next_value = agent.get_value(next_obs).reshape(1, -1)
                 advantages = torch.zeros_like(rewards_buf).to(device)
                 lastgaelam = 0
-                for t in reversed(range(args.num_steps)):
-                    if t == args.num_steps - 1:
+                for t in reversed(range(cfg.num_steps)):
+                    if t == cfg.num_steps - 1:
                         nextnonterminal = 1.0 - next_done
                         nextvalues = next_value
                     else:
                         nextnonterminal = 1.0 - dones_buf[t + 1]
                         nextvalues = values_buf[t + 1]
-                    delta = rewards_buf[t] + args.gamma * nextvalues * nextnonterminal - values_buf[t]
-                    advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                    delta = rewards_buf[t] + cfg.gamma * nextvalues * nextnonterminal - values_buf[t]
+                    advantages[t] = lastgaelam = delta + cfg.gamma * cfg.gae_lambda * nextnonterminal * lastgaelam
                 returns = advantages + values_buf
 
             b_obs = obs_buf.reshape((-1,) + envs.single_observation_space.shape)
@@ -313,12 +335,12 @@ if __name__ == "__main__":
             b_masks = masks_buf.reshape((-1, envs.single_action_space.n))
 
             # Training
-            b_inds = np.arange(args.batch_size)
+            b_inds = np.arange(batch_size)
             clipfracs = []
-            for epoch in range(args.update_epochs):
+            for epoch in range(cfg.update_epochs):
                 np.random.shuffle(b_inds)
-                for start in range(0, args.batch_size, args.minibatch_size):
-                    end = start + args.minibatch_size
+                for start in range(0, batch_size, minibatch_size):
+                    end = start + minibatch_size
                     mb_inds = b_inds[start:end]
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_masks[mb_inds], b_actions.long()[mb_inds])
                     logratio = newlogprob - b_logprobs[mb_inds]
@@ -327,24 +349,24 @@ if __name__ == "__main__":
                     with torch.no_grad():
                         old_approx_kl = (-logratio).mean()
                         approx_kl = ((ratio - 1) - logratio).mean()
-                        clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                        clipfracs += [((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item()]
 
                     mb_advantages = b_advantages[mb_inds]
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                     # Policy Loss
                     pg_loss1 = -mb_advantages * ratio
-                    pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                    pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef)
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value Loss
                     newvalue = newvalue.view(-1)
-                    if args.clip_vloss:
+                    if cfg.clip_vloss:
                         v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
                         v_clipped = b_values[mb_inds] + torch.clamp(
                             newvalue - b_values[mb_inds],
-                            -args.clip_coef,
-                            args.clip_coef,
+                            -cfg.clip_coef,
+                            cfg.clip_coef,
                         )
                         v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
                         v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
@@ -356,14 +378,14 @@ if __name__ == "__main__":
                     entropy_loss = entropy.mean()
 
                     # Combined Loss
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                    loss = pg_loss - cfg.ent_coef * entropy_loss + v_loss * cfg.vf_coef
 
                     optimizer.zero_grad()
                     loss.backward()
-                    nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                    nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
                     optimizer.step()
 
-                if args.target_kl is not None and approx_kl > args.target_kl:
+                if cfg.target_kl is not None and approx_kl > cfg.target_kl:
                     break
 
             t_train_end = time.time()
@@ -415,14 +437,14 @@ if __name__ == "__main__":
             )
 
             # Checkpointing
-            if update % args.save_interval == 0:
+            if update % cfg.save_interval == 0:
                 os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
                 checkpoint = {
                     "model": agent.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "global_step": global_step,
                     "update": update,
-                    "args": vars(args),
+                    "config": dataclasses.asdict(cfg),
                     "total_games": total_games,
                     "total_wins": total_wins,
                     "total_losses": total_losses,
@@ -434,7 +456,7 @@ if __name__ == "__main__":
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/latest.pt")
 
                 elapsed = time.time() - start_time
-                summary_start = max(start_update, update - args.save_interval + 1)
+                summary_start = max(start_update, update - cfg.save_interval + 1)
                 n_recent = len(recent_returns)
                 n_recent_w = len(recent_wins)
                 n_recent_l = len(recent_losses)
