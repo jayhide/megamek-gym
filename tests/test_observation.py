@@ -145,6 +145,19 @@ class TestFlattenObservation:
         assert flat[offset + 2] == pytest.approx(8 / 10)
         assert flat[offset + 3] == 0.0  # not location-destroyed
 
+    def test_destroyed_location_negative_internal(self):
+        """Java sends internal=-3 (ARMOR_DESTROYED) for destroyed locations."""
+        obs = _make_obs()
+        # Set CT to destroyed: armor=-3, internal=-3
+        obs["units"][0]["armor"][0]["armor"] = -3
+        obs["units"][0]["armor"][0]["internal"] = -3
+        flat = flatten_observation(obs, rl_owner_id=0)
+        offset = BOARD_SIZE + 16  # armor section for RL unit
+        # internal ratio should be clamped to 0.0, not negative
+        assert flat[offset + 1] == pytest.approx(0.0)
+        # location destroyed flag should be 1.0
+        assert flat[offset + 3] == 1.0
+
     def test_weapon_destroyed_flags(self):
         obs = _make_obs()
         flat = flatten_observation(obs, rl_owner_id=0)

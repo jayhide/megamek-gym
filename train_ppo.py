@@ -40,6 +40,7 @@ def make_env(env_index, args):
         cfg.megamek_dir = megamek_dir
         cfg.rl_port = args.port_base
         env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
+        env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
     return thunk
@@ -74,13 +75,14 @@ def parse_args():
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-coef", type=float, default=0.2)
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
     parser.add_argument("--ent-coef", type=float, default=0.05)
-    parser.add_argument("--vf-coef", type=float, default=0.5)
+    parser.add_argument("--vf-coef", type=float, default=1.0)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--target-kl", type=float, default=0.03)
 
     # Checkpointing
+    parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--save-interval", type=int, default=50)
     parser.add_argument("--resume", type=str, default=None)
 
@@ -138,7 +140,7 @@ if __name__ == "__main__":
 
     try:  # try/finally to guarantee envs.close() on any exception
 
-        agent = Agent(envs.single_observation_space.shape[0], envs.single_action_space.n).to(device)
+        agent = Agent(envs.single_observation_space.shape[0], envs.single_action_space.n, hidden_size=args.hidden_size).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
         if args.resume:
@@ -181,7 +183,8 @@ if __name__ == "__main__":
         print(f"\n{'='*60}")
         print(f"  PPO Training — {args.exp_name}")
         print(f"  Device: {device} | Envs: {args.num_envs} | Stagger: {args.stagger_delay}s")
-        print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n}")
+        n_params = sum(p.numel() for p in agent.parameters())
+        print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n} | Hidden: {args.hidden_size} | Params: {n_params:,}")
         print(f"  Timesteps: {args.total_timesteps:,} | Updates: {num_updates}")
         print(f"  Batch: {args.batch_size} | Minibatch: {args.minibatch_size}")
         print(f"  LR: {args.learning_rate} | Ent: {args.ent_coef} | Gamma: {args.gamma}")
@@ -406,6 +409,7 @@ if __name__ == "__main__":
                 f" SPS={sps}"
                 f" | pg={pg_loss.item():.4f} vf={v_loss.item():.4f} ent={entropy_loss.item():.3f}"
                 f" | kl={approx_kl.item():.4f} clip={np.mean(clipfracs):.3f}"
+                f" | ev={explained_var:.4f}"
                 f" | legal={legal_mean}/{legal_max}"
                 f" | rollout={rollout_s:.1f}s train={train_s:.1f}s episodes={episodes_this_rollout}"
             )

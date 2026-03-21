@@ -156,11 +156,11 @@ def _encode_unit(
             rear_max = loc.get("rear_armor_max", 0)
 
             buf[i] = loc.get("armor", 0) / max(armor_max, 1)
-            buf[i + 1] = loc.get("internal", 0) / max(internal_max, 1)
+            buf[i + 1] = max(0.0, loc.get("internal", 0)) / max(internal_max, 1)
             buf[i + 2] = loc.get("rear_armor", 0) / max(rear_max, 1) if rear_max > 0 else 0.0
             buf[i + 3] = float(
-                loc.get("armor", 0) == 0
-                and loc.get("internal", 0) == 0
+                loc.get("armor", 0) <= 0
+                and loc.get("internal", 0) <= 0
             )
         i += 4
 

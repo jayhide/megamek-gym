@@ -8,21 +8,21 @@ OUTCOME_MAP = {1: "WIN", -1: "LOSS", 0: "DRAW"}
 
 
 class Agent(nn.Module):
-    def __init__(self, obs_size, action_size):
+    def __init__(self, obs_size, action_size, hidden_size=512):
         super().__init__()
         self.critic = nn.Sequential(
-            nn.Linear(obs_size, 256),
+            nn.Linear(obs_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Linear(hidden_size, 1),
         )
         self.actor = nn.Sequential(
-            nn.Linear(obs_size, 256),
+            nn.Linear(obs_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(256, action_size),
+            nn.Linear(hidden_size, action_size),
         )
 
     def get_value(self, obs):
@@ -47,7 +47,8 @@ def load_agent(checkpoint_path, obs_size, action_size, device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    agent = Agent(obs_size, action_size).to(device)
+    hidden_size = checkpoint.get("args", {}).get("hidden_size", 512)
+    agent = Agent(obs_size, action_size, hidden_size=hidden_size).to(device)
     agent.load_state_dict(checkpoint["model"])
     agent.eval()
     return agent, checkpoint, device

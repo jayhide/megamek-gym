@@ -30,7 +30,7 @@ def _unit_summary(unit: dict | None, label: str) -> str:
     armor_max = sum(
         loc.get("armor_max", 0) + loc.get("rear_armor_max", 0) for loc in armor_locs
     )
-    internal_cur = sum(loc.get("internal", 0) for loc in armor_locs)
+    internal_cur = sum(max(0, loc.get("internal", 0)) for loc in armor_locs)
     internal_max = sum(loc.get("internal_max", 0) for loc in armor_locs)
 
     status = "DEAD" if destroyed else "ok"

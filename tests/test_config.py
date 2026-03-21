@@ -25,7 +25,7 @@ class TestParseBoardDimensions:
 class TestMegaMekConfig:
     def test_defaults(self):
         cfg = MegaMekConfig()
-        assert cfg.rl_unit == "Firestarter FS9-H"
+        assert cfg.rl_unit == "Commando COM-2D"
         assert cfg.resolved_board_width == 16
         assert cfg.resolved_board_height == 17
 
@@ -84,4 +84,17 @@ class TestMegaMekConfig:
         content = Path(path).read_text()
         assert "board_width: 20" in content
         assert "board_height: 24" in content
+        Path(path).unlink()
+
+    def test_opponent_type_default(self):
+        cfg = MegaMekConfig()
+        assert cfg.opponent_type == "princess"
+
+    def test_opponent_type_yaml_roundtrip(self):
+        cfg = MegaMekConfig(opponent_type="rl")
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            path = f.name
+        cfg.save(path)
+        loaded = MegaMekConfig.load(path)
+        assert loaded.opponent_type == "rl"
         Path(path).unlink()

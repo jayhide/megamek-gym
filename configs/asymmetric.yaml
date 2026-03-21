@@ -1,6 +1,6 @@
 megamek_dir: ../megamek
 rl_unit: Commando COM-2D
-opponent_unit: Commando COM-2D
+opponent_unit: Flea FLE-15
 board: Map Set 6/16x17 BattleForce 2
 rl_port: 9999
 env_index: 0
@@ -16,4 +16,4 @@ opponent_starting_pos: 6
 rl_deployment: false
 firing_strategy: princess
 step_timeout_seconds: 30
-max_game_rounds: 40
+max_game_rounds: 100
