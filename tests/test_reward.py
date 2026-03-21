@@ -5,7 +5,8 @@ import pytest
 from megamek_gym.reward import (
     CompositeReward, CoverReward, DamageDeltaReward, LocationDestructionReward,
     PronePenaltyReward, RangeAdvantageReward, WinLossReward,
-    _cover_value, _get_prone_status, _hex_distance, _range_quality,
+    _cover_value, _get_prone_status, _hex_bearing, _hex_distance,
+    _in_firing_arc, _range_quality,
 )
 
 
@@ -107,6 +108,21 @@ class TestDamageDeltaReward:
         obs2 = _make_obs(enemy_internal=6)  # lost 2 IS
         reward = r.compute(obs1, obs2, False)
         assert reward == pytest.approx(6 / 100)  # 2 * 3.0 = 6
+
+    def test_destroyed_location_negative_internal_clamped(self):
+        """Java sends internal=-3 for destroyed locations; should be treated as 0."""
+        r = DamageDeltaReward(normalizer=100.0)
+        r.reset()
+        r.set_rl_owner(0)
+        # Enemy starts with internal=5
+        obs1 = _make_obs(enemy_internal=5)
+        r.compute({}, obs1, False)
+
+        # Enemy location destroyed: internal=-3 (ARMOR_DESTROYED)
+        obs2 = _make_obs(enemy_internal=-3)
+        reward = r.compute(obs1, obs2, False)
+        # Damage = 5 internal lost * 2x multiplier = 10
+        assert reward == pytest.approx(10 / 100)
 
     def test_terminal_empty_units(self):
         r = DamageDeltaReward()
@@ -333,11 +349,98 @@ class TestHexDistance:
         assert _hex_distance(1, 0, 2, 0) == 1
 
 
+# --- Hex bearing helper ---
+
+class TestHexBearing:
+    def test_same_hex(self):
+        assert _hex_bearing(3, 3, 3, 3) == 0.0
+
+    def test_due_north(self):
+        # (5, 5) to (5, 3) — straight up (decreasing y = north)
+        bearing = _hex_bearing(5, 5, 5, 3)
+        assert bearing == pytest.approx(0.0, abs=1.0)
+
+    def test_due_south(self):
+        bearing = _hex_bearing(5, 3, 5, 5)
+        assert bearing == pytest.approx(180.0, abs=1.0)
+
+    def test_northeast(self):
+        # Moving right and up in hex grid — bearing should be roughly 0-90°
+        bearing = _hex_bearing(4, 4, 5, 3)
+        assert 0 < bearing < 90
+
+    def test_southeast(self):
+        bearing = _hex_bearing(4, 4, 5, 5)
+        assert 90 < bearing < 180
+
+    def test_symmetry(self):
+        """Bearing from A→B and B→A should differ by ~180°."""
+        b1 = _hex_bearing(2, 3, 5, 1)
+        b2 = _hex_bearing(5, 1, 2, 3)
+        diff = abs(b1 - b2)
+        if diff > 180:
+            diff = 360 - diff
+        assert diff == pytest.approx(180.0, abs=1.0)
+
+
+# --- Firing arc helper ---
+
+class TestInFiringArc:
+    def test_forward_weapon_facing_north_target_north(self):
+        """CT weapon, facing 0 (north), target due north → in arc."""
+        assert _in_firing_arc(0, 1, 0.0) is True
+
+    def test_forward_weapon_facing_north_target_east(self):
+        """CT weapon, facing 0 (north), target 90° east → exactly at boundary."""
+        assert _in_firing_arc(0, 1, 90.0) is True
+
+    def test_forward_weapon_facing_north_target_behind(self):
+        """CT weapon, facing 0 (north), target 180° south → behind, out of arc."""
+        assert _in_firing_arc(0, 1, 180.0) is False
+
+    def test_right_arm_extends_right(self):
+        """RA (loc 4), facing 0 (north), target 120° → forward arc misses but RA arc covers."""
+        # Forward arc of facing 0 covers 270°-90°. 120° is outside.
+        # RA extends 60° to the right: covers up to 150° clockwise from facing.
+        assert _in_firing_arc(0, 4, 120.0) is True
+
+    def test_right_arm_limit(self):
+        """RA (loc 4), facing 0 (north), target 160° → outside even RA arc."""
+        assert _in_firing_arc(0, 4, 160.0) is False
+
+    def test_left_arm_extends_left(self):
+        """LA (loc 5), facing 0 (north), target 240° → forward arc misses but LA arc covers."""
+        assert _in_firing_arc(0, 5, 240.0) is True
+
+    def test_left_arm_limit(self):
+        """LA (loc 5), facing 0 (north), target 200° → outside even LA arc."""
+        assert _in_firing_arc(0, 5, 200.0) is False
+
+    def test_facing_3_south(self):
+        """Facing 3 (south = 180°), CT weapon, target due south → in arc."""
+        assert _in_firing_arc(3, 1, 180.0) is True
+
+    def test_facing_3_north_behind(self):
+        """Facing 3 (south = 180°), CT weapon, target due north → behind."""
+        assert _in_firing_arc(3, 1, 0.0) is False
+
+    def test_head_same_as_forward(self):
+        """HD (loc 0) uses forward arc."""
+        assert _in_firing_arc(0, 0, 45.0) is True
+        assert _in_firing_arc(0, 0, 180.0) is False
+
+    def test_leg_same_as_forward(self):
+        """Legs (loc 6, 7) use forward arc."""
+        assert _in_firing_arc(0, 6, 45.0) is True
+        assert _in_firing_arc(0, 7, 180.0) is False
+
+
 # --- Range quality helper ---
 
-def _weapon(damage, short, medium, long, min_range=0, destroyed=False):
+def _weapon(damage, short, medium, long, min_range=0, destroyed=False, location=1):
     return {"damage": damage, "short_range": short, "medium_range": medium,
-            "long_range": long, "min_range": min_range, "destroyed": destroyed}
+            "long_range": long, "min_range": min_range, "destroyed": destroyed,
+            "location": location}
 
 
 class TestRangeQuality:
@@ -384,31 +487,101 @@ class TestRangeQuality:
         assert _range_quality(unit, 2) == pytest.approx(1.0)
 
 
+# --- Range quality with facing ---
+
+class TestRangeQualityWithFacing:
+    def test_weapon_in_arc_unchanged(self):
+        """CT weapon facing toward target — same score as without facing."""
+        unit = {"weapons": [_weapon(5, 3, 6, 9, location=1)]}  # CT
+        # Without facing
+        score_no_facing = _range_quality(unit, 2)
+        # With facing 0 (north), target due north at (5, 3) from (5, 5)
+        score_facing = _range_quality(unit, 2, target_x=5, target_y=3,
+                                       unit_x=5, unit_y=5, unit_facing=0)
+        assert score_no_facing == pytest.approx(1.0)
+        assert score_facing == pytest.approx(1.0)
+
+    def test_weapon_out_of_arc_penalized(self):
+        """CT weapon facing away from target — score halved."""
+        unit = {"weapons": [_weapon(5, 3, 6, 9, location=1)]}  # CT
+        # Facing 3 (south = 180°), target is north at (5, 3) from (5, 5)
+        score = _range_quality(unit, 2, target_x=5, target_y=3,
+                                unit_x=5, unit_y=5, unit_facing=3)
+        # Normal short-range score is 1.0, halved to 0.5
+        assert score == pytest.approx(0.5)
+
+    def test_mixed_weapons_in_and_out_of_arc(self):
+        """One weapon in arc, one out — damage-weighted average."""
+        # Both at short range (score 1.0 base), but one in CT (in arc) and one in CT facing away
+        # Let's use: facing 0 (north), target east at bearing ~90° (boundary)
+        # CT weapon at 90° is at the boundary (in arc), but target at 150° would be out
+        # Use: facing 0, target due south (180°)
+        # CT weapon: out of arc → 1.0 * 0.5 = 0.5
+        # RA weapon (loc 4): also out since 180° > 150° → 1.0 * 0.5 = 0.5
+        # LA weapon (loc 5): also out since 180° → left_diff = (0-180)%360 = 180 > 150 → out
+        # Better test: facing 0, target at 120° bearing
+        # CT (loc 1): 120° > 90° → out of arc → score * 0.5
+        # RA (loc 4): 120° ≤ 150° → in arc → full score
+        unit = {"weapons": [
+            _weapon(5, 3, 6, 9, location=1),   # CT — out of forward arc at 120°
+            _weapon(5, 3, 6, 9, location=4),   # RA — in extended right arc at 120°
+        ]}
+        # We need actual hex coords that produce ~120° bearing
+        # (0,0) to (2,2): bearing should be roughly south-east
+        # Let's just test with explicit bearing by using _range_quality directly
+        # Facing 0, and we pick coords where bearing ≈ 120°
+        # For a clean test, use facing=0 and south (180°) target
+        # CT: out → 1.0 * 0.5 = 0.5, weighted by damage 5
+        # RA (loc 4): 180° > 150° → also out → 1.0 * 0.5 = 0.5
+        # That's not interesting. Let me use facing=1 (60°) and bearing ~120° target
+        # Forward arc: 60° ± 90° = [-30°, 150°] → 330°-150°. Bearing 180° is outside.
+        # RA extends right to 60°+150° = 210°. Bearing 180° < 210° → in arc.
+        unit_facing1 = {"weapons": [
+            _weapon(10, 3, 6, 9, location=1),  # CT — out of forward arc at 180°
+            _weapon(5, 3, 6, 9, location=4),   # RA — in extended arc at 180°
+        ]}
+        score = _range_quality(unit_facing1, 2, target_x=5, target_y=7,
+                                unit_x=5, unit_y=5, unit_facing=1)
+        # CT: short range = 1.0 * 0.5 (out of arc) = 0.5, weight 10
+        # RA: short range = 1.0 (in arc), weight 5
+        # Weighted avg: (10*0.5 + 5*1.0) / 15 = 10/15 = 0.6667
+        assert score == pytest.approx(10.0 / 15.0, abs=0.05)
+
+    def test_backward_compat_no_facing(self):
+        """Without facing args, behaves identically to old version."""
+        unit = {"weapons": [_weapon(5, 3, 6, 9, location=1)]}
+        assert _range_quality(unit, 2) == pytest.approx(1.0)
+
+
 # --- RangeAdvantageReward ---
 
 def _make_range_obs(rl_x=5, rl_y=5, enemy_x=8, enemy_y=5,
                     rl_weapons=None, enemy_weapons=None,
                     rl_destroyed=False, enemy_destroyed=False,
+                    rl_facing=None, enemy_facing=None,
                     terminated=False):
     """Build an observation for range advantage tests."""
     if rl_weapons is None:
         rl_weapons = [_weapon(5, 3, 6, 9)]
     if enemy_weapons is None:
         enemy_weapons = [_weapon(5, 3, 6, 9)]
+    rl_unit = {"id": 1, "owner": 0, "x": rl_x, "y": rl_y,
+               "destroyed": rl_destroyed, "weapons": rl_weapons,
+               "armor": [{"location": "CT", "armor": 20, "armor_max": 30,
+                          "internal": 10, "internal_max": 15,
+                          "rear_armor": 0, "rear_armor_max": 0}]}
+    enemy_unit = {"id": 2, "owner": 1, "x": enemy_x, "y": enemy_y,
+                  "destroyed": enemy_destroyed, "weapons": enemy_weapons,
+                  "armor": [{"location": "CT", "armor": 15, "armor_max": 20,
+                             "internal": 8, "internal_max": 10,
+                             "rear_armor": 0, "rear_armor_max": 0}]}
+    if rl_facing is not None:
+        rl_unit["facing"] = rl_facing
+    if enemy_facing is not None:
+        enemy_unit["facing"] = enemy_facing
     obs = {
         "terminated": terminated,
-        "units": [
-            {"id": 1, "owner": 0, "x": rl_x, "y": rl_y,
-             "destroyed": rl_destroyed, "weapons": rl_weapons,
-             "armor": [{"location": "CT", "armor": 20, "armor_max": 30,
-                        "internal": 10, "internal_max": 15,
-                        "rear_armor": 0, "rear_armor_max": 0}]},
-            {"id": 2, "owner": 1, "x": enemy_x, "y": enemy_y,
-             "destroyed": enemy_destroyed, "weapons": enemy_weapons,
-             "armor": [{"location": "CT", "armor": 15, "armor_max": 20,
-                        "internal": 8, "internal_max": 10,
-                        "rear_armor": 0, "rear_armor_max": 0}]},
-        ],
+        "units": [rl_unit, enemy_unit],
     }
     return obs
 
@@ -482,6 +655,60 @@ class TestRangeAdvantageReward:
         )
         reward = r.compute({}, obs, False)
         assert reward == pytest.approx(2.0)
+
+    def test_mirror_matchup_facing_breaks_tie(self):
+        """Mirror matchup: same weapons, same distance. Facing toward target wins."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        weapons = [_weapon(5, 3, 6, 9, location=1)]  # CT weapon
+        # RL at (5, 5) facing 0 (north), enemy at (5, 3) facing 3 (south=toward RL)
+        # RL facing north, enemy is north → RL faces toward enemy → in arc
+        # Enemy facing south, RL is south of enemy → enemy faces toward RL → in arc
+        # Both face each other → should still cancel (both in arc)
+        # For a real tie-break: RL faces AWAY from enemy
+        # RL facing 3 (south), enemy at (5, 3) is north → RL faces away
+        # Enemy facing 3 (south), RL at (5, 5) is south → enemy faces toward RL
+        obs = _make_range_obs(
+            rl_x=5, rl_y=5, enemy_x=5, enemy_y=3,
+            rl_weapons=weapons, enemy_weapons=weapons,
+            rl_facing=3, enemy_facing=3,  # both face south
+        )
+        reward = r.compute({}, obs, False)
+        # RL faces south, enemy is north → RL weapons out of arc → score * 0.5 = 0.5
+        # Enemy faces south, RL is south → enemy weapons in arc → score = 1.0
+        # Advantage: 0.5 - 1.0 = -0.5
+        assert reward == pytest.approx(-0.5)
+
+    def test_both_facing_each_other_cancels(self):
+        """Mirror matchup with both facing each other → cancels to 0."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        weapons = [_weapon(5, 3, 6, 9, location=1)]  # CT weapon
+        # RL at (5,5) facing 0 (north), enemy at (5,3) facing 3 (south)
+        # Both face each other → both in arc
+        obs = _make_range_obs(
+            rl_x=5, rl_y=5, enemy_x=5, enemy_y=3,
+            rl_weapons=weapons, enemy_weapons=weapons,
+            rl_facing=0, enemy_facing=3,
+        )
+        reward = r.compute({}, obs, False)
+        assert reward == pytest.approx(0.0)
+
+    def test_no_facing_field_backward_compat(self):
+        """Without facing in unit data, behaves as before (no arc penalty)."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        # Same weapons, same distance → cancels to 0 (old behavior)
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=2, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],
+            enemy_weapons=[_weapon(5, 3, 6, 9)],
+        )
+        reward = r.compute({}, obs, False)
+        assert reward == pytest.approx(0.0)
 
 
 # --- Cover value helper ---

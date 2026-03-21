@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 
 
@@ -27,7 +28,7 @@ def _weighted_hp(units: list[dict], owner_id: int, internal_multiplier: float = 
         if u["owner"] == owner_id:
             for loc in u.get("armor", []):
                 total += loc.get("armor", 0) + loc.get("rear_armor", 0)
-                total += loc.get("internal", 0) * internal_multiplier
+                total += max(0, loc.get("internal", 0)) * internal_multiplier
     return total
 
 
@@ -214,24 +215,96 @@ class LocationDestructionReward(RewardFunction):
         self._rl_owner = owner_id
 
 
+def _to_cube(x: int, y: int) -> tuple[int, int, int]:
+    """Convert even-column offset coordinates to cube coordinates."""
+    q = x
+    r = y - (x + (x & 1)) // 2
+    s = -q - r
+    return q, r, s
+
+
 def _hex_distance(x1: int, y1: int, x2: int, y2: int) -> int:
-    """Hex distance using offset coordinates (even-column offset, MegaMek convention).
-
-    Converts to cube coordinates then computes standard hex distance.
-    """
-    # Convert even-column offset to cube coordinates
-    def _to_cube(x: int, y: int) -> tuple[int, int, int]:
-        q = x
-        r = y - (x + (x & 1)) // 2
-        s = -q - r
-        return q, r, s
-
+    """Hex distance using offset coordinates (even-column offset, MegaMek convention)."""
     q1, r1, s1 = _to_cube(x1, y1)
     q2, r2, s2 = _to_cube(x2, y2)
     return (abs(q1 - q2) + abs(r1 - r2) + abs(s1 - s2)) // 2
 
 
-def _range_quality(unit: dict, distance: int) -> float:
+def _hex_bearing(x1: int, y1: int, x2: int, y2: int) -> float:
+    """Compass bearing in degrees (0=North, clockwise) from hex (x1,y1) to (x2,y2).
+
+    Uses cube coordinates converted to Cartesian pixel positions for flat-top hexes.
+    Returns 0.0 if source and target are the same hex.
+    """
+    if x1 == x2 and y1 == y2:
+        return 0.0
+
+    q1, r1, _ = _to_cube(x1, y1)
+    q2, r2, _ = _to_cube(x2, y2)
+
+    # Flat-top hex: pixel_x = 3/2 * q, pixel_y = sqrt(3) * (r + q/2)
+    sqrt3 = math.sqrt(3)
+    px1 = 1.5 * q1
+    py1 = sqrt3 * (r1 + q1 / 2.0)
+    px2 = 1.5 * q2
+    py2 = sqrt3 * (r2 + q2 / 2.0)
+
+    dx = px2 - px1
+    dy = py2 - py1
+
+    # atan2 with North=up: angle from positive-Y axis, clockwise
+    # Screen Y increases downward, so negate dy for compass bearing
+    angle_rad = math.atan2(dx, -dy)
+    angle_deg = math.degrees(angle_rad) % 360
+    return angle_deg
+
+
+def _in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
+    """Check if a weapon can fire at a target given the unit's facing and bearing.
+
+    Args:
+        facing: Unit facing (0-5), where 0=North, 1=NE, etc.
+        weapon_location: MegaMek location index (0=HD, 1=CT, 2=RT, 3=LT, 4=RA, 5=LA, 6=RL, 7=LL)
+        bearing: Compass bearing to target in degrees (0=North, clockwise)
+
+    Returns:
+        True if the weapon can fire at the target.
+
+    Firing arcs (standard BattleMech):
+        Forward (HD, CT, RT, LT, legs): ±90° from facing direction (180° cone)
+        Right arm (RA=4): forward arc + 60° to the right (240° cone)
+        Left arm (LA=5): forward arc + 60° to the left (240° cone)
+    """
+    facing_deg = facing * 60.0
+
+    # Angle difference: how far the bearing is from facing direction
+    diff = (bearing - facing_deg) % 360
+    if diff > 180:
+        diff = 360 - diff
+
+    # Forward arc: within 90° of facing
+    if diff <= 90:
+        return True
+
+    # Arm arcs get extra 60° on their side
+    if weapon_location == 4:  # RA — extends 60° to the right
+        # Check if bearing is within 150° clockwise from facing
+        right_diff = (bearing - facing_deg) % 360
+        if right_diff <= 150:
+            return True
+    elif weapon_location == 5:  # LA — extends 60° to the left
+        # Check if bearing is within 150° counter-clockwise from facing
+        left_diff = (facing_deg - bearing) % 360
+        if left_diff <= 150:
+            return True
+
+    return False
+
+
+def _range_quality(unit: dict, distance: int,
+                   target_x: int | None = None, target_y: int | None = None,
+                   unit_x: int | None = None, unit_y: int | None = None,
+                   unit_facing: int | None = None) -> float:
     """Score how well a unit's weapons perform at the given distance.
 
     Returns a damage-weighted average of per-weapon range bracket scores:
@@ -240,7 +313,18 @@ def _range_quality(unit: dict, distance: int) -> float:
     - distance <= medium_range: 0.5
     - distance <= long_range: 0.0
     - distance > long_range: -0.5
+
+    When facing info is provided (unit_x, unit_y, unit_facing, target_x, target_y),
+    weapons outside their firing arc have their score multiplied by 0.5 — they
+    contribute positively for being at favorable distance but at reduced value
+    since they can't fire this turn.
     """
+    # Compute bearing once if facing info is available
+    bearing = None
+    if (unit_facing is not None and unit_x is not None and unit_y is not None
+            and target_x is not None and target_y is not None):
+        bearing = _hex_bearing(unit_x, unit_y, target_x, target_y)
+
     total_score = 0.0
     total_damage = 0.0
     for w in unit.get("weapons", []):
@@ -264,6 +348,12 @@ def _range_quality(unit: dict, distance: int) -> float:
             score = 0.0
         else:
             score = -0.5
+
+        # Apply out-of-arc penalty
+        if bearing is not None:
+            weapon_loc = w.get("location", 1)  # default CT (always in forward arc)
+            if not _in_firing_arc(unit_facing, weapon_loc, bearing):
+                score *= 0.5
 
         total_score += score * damage
         total_damage += damage
@@ -307,10 +397,26 @@ class RangeAdvantageReward(RewardFunction):
         if rl_unit.get("x", -1) == -1 or enemy_unit.get("x", -1) == -1:
             return 0.0
 
-        dist = _hex_distance(rl_unit["x"], rl_unit["y"],
-                             enemy_unit["x"], enemy_unit["y"])
-        range_advantage = (_range_quality(rl_unit, dist)
-                           - _range_quality(enemy_unit, dist))
+        rl_x, rl_y = rl_unit["x"], rl_unit["y"]
+        ex, ey = enemy_unit["x"], enemy_unit["y"]
+        dist = _hex_distance(rl_x, rl_y, ex, ey)
+
+        rl_facing = rl_unit.get("facing")
+        enemy_facing = enemy_unit.get("facing")
+
+        rl_quality = _range_quality(
+            rl_unit, dist,
+            target_x=ex, target_y=ey,
+            unit_x=rl_x, unit_y=rl_y,
+            unit_facing=rl_facing,
+        )
+        enemy_quality = _range_quality(
+            enemy_unit, dist,
+            target_x=rl_x, target_y=rl_y,
+            unit_x=ex, unit_y=ey,
+            unit_facing=enemy_facing,
+        )
+        range_advantage = rl_quality - enemy_quality
         return self.scale * range_advantage
 
     def reset(self) -> None:
@@ -437,12 +543,12 @@ class CompositeReward(RewardFunction):
     def __init__(self, components: list[tuple[RewardFunction, float]] | None = None):
         if components is None:
             components = [
-                (DamageDeltaReward(), 1.0),
+                (DamageDeltaReward(normalizer=20.0), 1.0),
                 (LocationDestructionReward(), 1.0),
                 (RangeAdvantageReward(), 0.5),
                 (CoverReward(), 0.25),
                 (PronePenaltyReward(), 0.5),
-                (WinLossReward(), 10.0),
+                (WinLossReward(), 1.0),
             ]
         self.components = components
         self.last_details: list[tuple[str, float, float]] = []
