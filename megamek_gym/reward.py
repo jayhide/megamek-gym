@@ -372,8 +372,9 @@ class RangeAdvantageReward(RewardFunction):
     the enemy's weapons.
     """
 
-    def __init__(self, scale: float = 1.0):
+    def __init__(self, scale: float = 1.0, absolute_weight: float = 0.3):
         self.scale = scale
+        self.absolute_weight = absolute_weight
         self._rl_owner: int = -1
 
     def compute(self, prev_obs: dict, curr_obs: dict, terminated: bool) -> float:
@@ -417,8 +418,10 @@ class RangeAdvantageReward(RewardFunction):
             unit_x=ex, unit_y=ey,
             unit_facing=enemy_facing,
         )
-        range_advantage = rl_quality - enemy_quality
-        return self.scale * range_advantage
+        differential = rl_quality - enemy_quality
+        aw = self.absolute_weight
+        blended = aw * rl_quality + (1 - aw) * differential
+        return self.scale * blended
 
     def reset(self) -> None:
         self._rl_owner = -1

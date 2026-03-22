@@ -617,7 +617,8 @@ class TestRangeAdvantageReward:
             enemy_weapons=[_weapon(5, 3, 6, 9)],  # dist 2 → short → 1.0
         )
         reward = r.compute({}, obs, False)
-        assert reward == pytest.approx(-1.0)
+        # 0.3*0.0 + 0.7*(0.0 - 1.0) = -0.7
+        assert reward == pytest.approx(-0.7)
 
     def test_undeployed_rl_unit(self):
         r = RangeAdvantageReward()
@@ -680,31 +681,76 @@ class TestRangeAdvantageReward:
         reward = r.compute({}, obs, False)
         # RL faces south, enemy is north → RL weapons out of arc → score * 0.5 = 0.5
         # Enemy faces south, RL is south → enemy weapons in arc → score = 1.0
-        # Advantage: 0.5 - 1.0 = -0.5
-        assert reward == pytest.approx(-0.5)
+        # 0.3*0.5 + 0.7*(0.5 - 1.0) = 0.15 - 0.35 = -0.2
+        assert reward == pytest.approx(-0.2)
 
-    def test_both_facing_each_other_cancels(self):
-        """Mirror matchup with both facing each other → cancels to 0."""
+    def test_both_facing_each_other_absolute_bonus(self):
+        """Mirror matchup with both facing each other → absolute term gives positive reward."""
         r = RangeAdvantageReward()
         r.reset()
         r.set_rl_owner(0)
         weapons = [_weapon(5, 3, 6, 9, location=1)]  # CT weapon
         # RL at (5,5) facing 0 (north), enemy at (5,3) facing 3 (south)
-        # Both face each other → both in arc
+        # Both face each other → both in arc → rl_quality=1.0, enemy_quality=1.0
         obs = _make_range_obs(
             rl_x=5, rl_y=5, enemy_x=5, enemy_y=3,
             rl_weapons=weapons, enemy_weapons=weapons,
             rl_facing=0, enemy_facing=3,
         )
         reward = r.compute({}, obs, False)
-        assert reward == pytest.approx(0.0)
+        # 0.3*1.0 + 0.7*(1.0 - 1.0) = 0.3
+        assert reward == pytest.approx(0.3)
 
-    def test_no_facing_field_backward_compat(self):
-        """Without facing in unit data, behaves as before (no arc penalty)."""
+    def test_no_facing_field_gives_absolute_bonus(self):
+        """Without facing, mirror matchup gets absolute bonus (no arc penalty applied)."""
         r = RangeAdvantageReward()
         r.reset()
         r.set_rl_owner(0)
-        # Same weapons, same distance → cancels to 0 (old behavior)
+        # Same weapons, same distance → differential=0, but absolute term adds rl_quality
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=2, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],
+            enemy_weapons=[_weapon(5, 3, 6, 9)],
+        )
+        reward = r.compute({}, obs, False)
+        # 0.3*1.0 + 0.7*0.0 = 0.3
+        assert reward == pytest.approx(0.3)
+
+    def test_mirror_out_of_range_penalty(self):
+        """Mirror matchup out of range → mild negative from absolute term."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        # Both out of range: short=3, dist=15 → quality=-0.5 each
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=15, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],
+            enemy_weapons=[_weapon(5, 3, 6, 9)],
+        )
+        reward = r.compute({}, obs, False)
+        # 0.3*(-0.5) + 0.7*0.0 = -0.15
+        assert reward == pytest.approx(-0.15)
+
+    def test_mirror_in_range_positive(self):
+        """Mirror matchup in range → positive from absolute term."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        # Both in short range: dist=2, short=3 → quality=1.0 each
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=2, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],
+            enemy_weapons=[_weapon(5, 3, 6, 9)],
+        )
+        reward = r.compute({}, obs, False)
+        # 0.3*1.0 + 0.7*0.0 = 0.3
+        assert reward == pytest.approx(0.3)
+
+    def test_absolute_weight_zero_is_pure_differential(self):
+        """absolute_weight=0 gives old pure-differential behavior."""
+        r = RangeAdvantageReward(absolute_weight=0.0)
+        r.reset()
+        r.set_rl_owner(0)
         obs = _make_range_obs(
             rl_x=0, rl_y=0, enemy_x=2, enemy_y=0,
             rl_weapons=[_weapon(5, 3, 6, 9)],
@@ -712,6 +758,20 @@ class TestRangeAdvantageReward:
         )
         reward = r.compute({}, obs, False)
         assert reward == pytest.approx(0.0)
+
+    def test_absolute_weight_one_is_pure_absolute(self):
+        """absolute_weight=1.0 gives pure RL range quality."""
+        r = RangeAdvantageReward(absolute_weight=1.0)
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=2, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],      # dist 2 → short → 1.0
+            enemy_weapons=[_weapon(5, 1, 1, 15)],   # dist 2 → long → 0.0
+        )
+        reward = r.compute({}, obs, False)
+        # Pure absolute: 1.0 * 1.0 = 1.0 (enemy quality ignored)
+        assert reward == pytest.approx(1.0)
 
 
 # --- Cover value helper ---
