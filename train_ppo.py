@@ -487,6 +487,16 @@ if __name__ == "__main__":
         final_wr = total_wins / total_games * 100 if total_games > 0 else 0
         print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
         print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms} — {final_wr:.1f}% win rate)")
+        print(f"\n{'='*60}")
+        print(f"  Run directory:  runs/{run_name}")
+        print(f"  Latest checkpoint: runs/{run_name}/checkpoints/latest.pt")
+        print(f"\n  Resume training:")
+        print(f"    poetry run python train_ppo.py --megamek-dir {cfg.megamek_dir} --resume runs/{run_name}/checkpoints/latest.pt")
+        print(f"\n  Evaluate:")
+        print(f"    poetry run python eval.py --checkpoint runs/{run_name}/checkpoints/latest.pt --num-episodes 10")
+        print(f"\n  TensorBoard:")
+        print(f"    tensorboard --logdir runs/{run_name}")
+        print(f"{'='*60}")
 
     finally:
         writer.close()
