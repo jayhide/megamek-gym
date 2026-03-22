@@ -423,11 +423,15 @@ class MegaMekEnv(gymnasium.Env):
             elif outcome_str == "LOSS":
                 game_outcome = -1
 
+        n_legal = len(self._legal_moves)
+        moves_truncated = max(0, n_legal - self.config.max_legal_moves)
+
         info = {
             "action_mask": self.action_masks(),
             "round": game_round,
             "phase": raw_obs.get("phase", ""),
-            "n_legal_moves": len(self._legal_moves),
+            "n_legal_moves": n_legal,
+            "moves_truncated": moves_truncated,
             "game_outcome": game_outcome,
             "game_rounds": game_round,
             "java_crash": 0,
@@ -437,7 +441,7 @@ class MegaMekEnv(gymnasium.Env):
 
     def action_masks(self) -> np.ndarray:
         mask = np.zeros(self.config.max_legal_moves, dtype=bool)
-        n = len(self._legal_moves)
+        n = min(len(self._legal_moves), self.config.max_legal_moves)
         if n > 0:
             mask[:n] = True
         return mask

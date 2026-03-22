@@ -176,6 +176,8 @@ if __name__ == "__main__":
             total_draws = checkpoint.get("total_draws", 0)
             total_crashes = checkpoint.get("total_crashes", 0)
             total_early_terms = checkpoint.get("total_early_terms", 0)
+            total_moves_truncated_steps = checkpoint.get("total_moves_truncated_steps", 0)
+            total_moves_truncated_count = checkpoint.get("total_moves_truncated_count", 0)
             print(f"Resumed from {args.resume} at update {start_update}, global_step {global_step}")
             print(f"  Restored stats: {total_games} games (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms})")
         else:
@@ -221,6 +223,8 @@ if __name__ == "__main__":
         recent_lengths = []
         if not args.resume:
             total_games, total_wins, total_losses, total_draws, total_crashes, total_early_terms = 0, 0, 0, 0, 0, 0
+            total_moves_truncated_steps = 0  # steps where legal moves exceeded max_legal_moves
+            total_moves_truncated_count = 0  # total number of moves dropped across all steps
         rollout_n_legal = []
 
         for update in range(start_update, num_updates + 1):
@@ -254,6 +258,13 @@ if __name__ == "__main__":
                 next_done = torch.Tensor(done).to(device)
                 next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
                 rollout_n_legal.extend(info["n_legal_moves"])
+
+                # Track move truncation
+                trunc_counts = info.get("moves_truncated", np.zeros(cfg.num_envs))
+                for tc in trunc_counts:
+                    if tc > 0:
+                        total_moves_truncated_steps += 1
+                        total_moves_truncated_count += int(tc)
 
                 # Log episode completions (SameStep autoreset mode)
                 if "final_info" in info and "_final_info" in info:
@@ -419,6 +430,9 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/n_legal_moves_mean", np.mean(rollout_n_legal), global_step)
                 writer.add_scalar("charts/n_legal_moves_max", np.max(rollout_n_legal), global_step)
                 writer.add_scalar("charts/n_legal_moves_min", np.min(rollout_n_legal), global_step)
+            if total_moves_truncated_steps > 0:
+                writer.add_scalar("charts/moves_truncated_steps", total_moves_truncated_steps, global_step)
+                writer.add_scalar("charts/moves_truncated_count", total_moves_truncated_count, global_step)
             rollout_n_legal.clear()
 
             elapsed = time.time() - start_time
@@ -451,6 +465,8 @@ if __name__ == "__main__":
                     "total_draws": total_draws,
                     "total_crashes": total_crashes,
                     "total_early_terms": total_early_terms,
+                    "total_moves_truncated_steps": total_moves_truncated_steps,
+                    "total_moves_truncated_count": total_moves_truncated_count,
                 }
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/step_{global_step}.pt")
                 torch.save(checkpoint, f"runs/{run_name}/checkpoints/latest.pt")
@@ -487,6 +503,12 @@ if __name__ == "__main__":
         final_wr = total_wins / total_games * 100 if total_games > 0 else 0
         print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
         print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms} — {final_wr:.1f}% win rate)")
+        if total_moves_truncated_steps > 0:
+            total_steps = global_step - (checkpoint.get("global_step", 0) if args.resume else 0)
+            trunc_pct = total_moves_truncated_steps / max(total_steps, 1) * 100
+            print(f"\n  WARNING: Legal moves exceeded max_legal_moves ({cfg.max_legal_moves}) on {total_moves_truncated_steps} steps ({trunc_pct:.2f}%).")
+            print(f"           {total_moves_truncated_count} total moves were dropped (invisible to agent).")
+            print(f"           Consider increasing max_legal_moves in your config.")
         print(f"\n{'='*60}")
         print(f"  Run directory:  runs/{run_name}")
         print(f"  Latest checkpoint: runs/{run_name}/checkpoints/latest.pt")
