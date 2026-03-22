@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import numpy as np
 
+from megamek_gym.reward import cover_value, hex_distance, range_quality
+
 BOARD_WIDTH = 16
 BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
 UNIT_FEATURES = 55
 GLOBAL_FEATURES = 1  # rl_moves_first
-MOVE_FEATURES = 6  # dest_x, dest_y, facing, mp_used, jumping, prone
+MOVE_FEATURES = 10  # dest_x, dest_y, facing, mp_used, prone, dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff
 OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES  # 383 (without move features)
 
 
@@ -75,8 +77,10 @@ def flatten_observation(
 
     # Encode move features
     if max_legal_moves > 0 and legal_moves:
+        board_hexes = board.get("hexes", [])
         _flatten_move_features(
-            result, offset, legal_moves, max_legal_moves, board_width, board_height
+            result, offset, legal_moves, max_legal_moves, board_width, board_height,
+            rl_unit=rl_unit, enemy_unit=enemy_unit, board_hexes=board_hexes,
         )
 
     return result
@@ -89,22 +93,78 @@ def _flatten_move_features(
     max_legal_moves: int,
     board_width: int,
     board_height: int,
+    rl_unit: dict | None = None,
+    enemy_unit: dict | None = None,
+    board_hexes: list | None = None,
 ) -> None:
     """Write normalized move features into buf[offset:offset + max_legal_moves * MOVE_FEATURES].
 
-    Each move gets 6 floats: dest_x/W, dest_y/H, facing/5, mp_used/20, jumping, prone.
+    Each move gets 10 floats:
+      Kinematic: dest_x/W, dest_y/H, facing/5, mp_used/20, prone
+      Tactical:  dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff
     Unused slots (index >= len(legal_moves)) stay zero.
     """
+    # Pre-compute enemy info and elevation lookup
+    has_enemy = (enemy_unit is not None
+                 and enemy_unit.get("x", -1) >= 0
+                 and enemy_unit.get("y", -1) >= 0)
+    if has_enemy:
+        ex, ey = enemy_unit["x"], enemy_unit["y"]
+        enemy_facing = enemy_unit.get("facing")
+    else:
+        ex = ey = enemy_facing = None
+
+    max_dim = max(board_width, board_height)
+    elev_map: dict[tuple[int, int], float] = {}
+    if board_hexes:
+        for h in board_hexes:
+            elev_map[(h["x"], h["y"])] = h.get("elevation", 0)
+
+    enemy_elev = elev_map.get((ex, ey), 0) if has_enemy else 0
+
     n = min(len(legal_moves), max_legal_moves)
     for i in range(n):
         m = legal_moves[i]
         base = offset + i * MOVE_FEATURES
-        buf[base] = m.get("dest_x", 0) / board_width
-        buf[base + 1] = m.get("dest_y", 0) / board_height
-        buf[base + 2] = m.get("facing", 0) / 5.0
+        dest_x = m.get("dest_x", 0)
+        dest_y = m.get("dest_y", 0)
+        facing = m.get("facing", 0)
+
+        # Kinematic features (5)
+        buf[base] = dest_x / board_width
+        buf[base + 1] = dest_y / board_height
+        buf[base + 2] = facing / 5.0
         buf[base + 3] = m.get("mp_used", 0) / 20.0
-        buf[base + 4] = float(m.get("jumping", False))
-        buf[base + 5] = float(m.get("prone", False))
+        buf[base + 4] = float(m.get("prone", False))
+
+        # Tactical features (5)
+        if has_enemy:
+            dist = hex_distance(dest_x, dest_y, ex, ey)
+            buf[base + 5] = dist / max_dim
+
+            # RL weapon effectiveness from this hypothetical position
+            buf[base + 6] = range_quality(
+                rl_unit, dist,
+                target_x=ex, target_y=ey,
+                unit_x=dest_x, unit_y=dest_y,
+                unit_facing=facing,
+            ) if rl_unit else 0.0
+
+            # Enemy weapon effectiveness at this distance
+            buf[base + 7] = range_quality(
+                enemy_unit, dist,
+                target_x=dest_x, target_y=dest_y,
+                unit_x=ex, unit_y=ey,
+                unit_facing=enemy_facing,
+            )
+
+            # Terrain cover at destination
+            if board_hexes:
+                buf[base + 8] = cover_value(board_hexes, dest_x, dest_y) / 2.0
+
+            # Elevation advantage
+            dest_elev = elev_map.get((dest_x, dest_y), 0)
+            buf[base + 9] = (dest_elev - enemy_elev) / 10.0
 
 
 def _encode_unit(

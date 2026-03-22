@@ -52,8 +52,10 @@ def _make_unit(owner, unit_id=1, x=5, y=7, facing=2, **kwargs):
             },
         ],
         "weapons": [
-            {"name": "Medium Laser", "location": 0, "destroyed": False, "damage": 5},
-            {"name": "SRM 4", "location": 1, "destroyed": True, "damage": 8},
+            {"name": "Medium Laser", "location": 0, "destroyed": False, "damage": 5,
+             "min_range": 0, "short_range": 3, "medium_range": 6, "long_range": 9},
+            {"name": "SRM 4", "location": 1, "destroyed": True, "damage": 8,
+             "min_range": 0, "short_range": 3, "medium_range": 6, "long_range": 9},
         ],
         **kwargs,
     }
@@ -236,26 +238,24 @@ class TestMoveFeatures:
         expected = compute_obs_size(16, 17, self.MAX_MOVES)
         assert flat.shape == (expected,)
 
-    def test_move_feature_values(self):
+    def test_kinematic_feature_values(self):
         flat = self._flat_with_moves()
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
 
-        # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1, jumping=False, prone=False
+        # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1, prone=False
         assert flat[move_offset] == pytest.approx(5 / 16)
         assert flat[move_offset + 1] == pytest.approx(6 / 17)
         assert flat[move_offset + 2] == pytest.approx(2 / 5.0)
         assert flat[move_offset + 3] == pytest.approx(1 / 20.0)
-        assert flat[move_offset + 4] == 0.0  # not jumping
-        assert flat[move_offset + 5] == 0.0  # not prone
+        assert flat[move_offset + 4] == 0.0  # not prone
 
-        # Move 1: dest_x=6, dest_y=7, facing=3, mp_used=2, jumping=True, prone=False
+        # Move 1: dest_x=6, dest_y=7, facing=3, mp_used=2, prone=False
         m1 = move_offset + MOVE_FEATURES
         assert flat[m1] == pytest.approx(6 / 16)
         assert flat[m1 + 1] == pytest.approx(7 / 17)
         assert flat[m1 + 2] == pytest.approx(3 / 5.0)
         assert flat[m1 + 3] == pytest.approx(2 / 20.0)
-        assert flat[m1 + 4] == 1.0  # jumping
-        assert flat[m1 + 5] == 0.0  # not prone
+        assert flat[m1 + 4] == 0.0  # not prone
 
     def test_padding_zeros(self):
         """Unused move slots should be all zeros."""
@@ -280,7 +280,7 @@ class TestMoveFeatures:
         np.testing.assert_array_equal(flat[move_offset:move_end], 0.0)
 
     def test_deployment_move_zeros(self):
-        """Deployment moves (no mp_used/jumping/prone) should default to 0."""
+        """Deployment moves (no mp_used/prone) should default to 0."""
         obs = _make_obs()
         obs["legal_moves"] = [
             {"index": 0, "dest_x": 3, "dest_y": 4, "facing": 0},
@@ -295,8 +295,7 @@ class TestMoveFeatures:
         assert flat[move_offset + 1] == pytest.approx(4 / 17)
         assert flat[move_offset + 2] == pytest.approx(0 / 5.0)
         assert flat[move_offset + 3] == 0.0  # mp_used defaults to 0
-        assert flat[move_offset + 4] == 0.0  # jumping defaults to 0
-        assert flat[move_offset + 5] == 0.0  # prone defaults to 0
+        assert flat[move_offset + 4] == 0.0  # prone defaults to 0
 
     def test_unit_features_unchanged(self):
         """Adding move features should not affect board or unit encoding."""
@@ -305,6 +304,137 @@ class TestMoveFeatures:
         flat_with = self._flat_with_moves(obs)
         # First OBS_SIZE elements should be identical
         np.testing.assert_array_equal(flat_with[:OBS_SIZE], flat_without[:OBS_SIZE])
+
+
+class TestTacticalMoveFeatures:
+    """Tests for pre-computed tactical features in the move embedding."""
+
+    MAX_MOVES = 10
+
+    def test_move_feature_count(self):
+        assert MOVE_FEATURES == 10
+
+    def test_dist_to_enemy(self):
+        """Distance from move destination to enemy position."""
+        from megamek_gym.reward import hex_distance
+        obs = _make_obs()
+        # Move 0 goes to (5, 6), enemy at (10, 12)
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        expected_dist = hex_distance(5, 6, 10, 12)
+        max_dim = max(16, 17)
+        assert flat[move_offset + 5] == pytest.approx(expected_dist / max_dim)
+
+    def test_range_quality_feature(self):
+        """RL weapon effectiveness from hypothetical move position."""
+        from megamek_gym.reward import hex_distance, range_quality
+        # Place enemy close enough to be in Medium Laser range (short=3)
+        obs = _make_obs()
+        obs["units"][1]["x"] = 7
+        obs["units"][1]["y"] = 7
+        # Move 0 goes to (5, 6) — close to enemy at (7, 7)
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        dist = hex_distance(5, 6, 7, 7)
+        expected = range_quality(
+            obs["units"][0], dist,
+            target_x=7, target_y=7,
+            unit_x=5, unit_y=6, unit_facing=2,
+        )
+        assert flat[move_offset + 6] == pytest.approx(expected)
+        assert expected != 0.0  # sanity: should be a real score
+
+    def test_enemy_range_quality_feature(self):
+        """Enemy weapon effectiveness at move distance."""
+        from megamek_gym.reward import hex_distance, range_quality
+        obs = _make_obs()
+        obs["units"][1]["x"] = 7
+        obs["units"][1]["y"] = 7
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        dist = hex_distance(5, 6, 7, 7)
+        expected = range_quality(
+            obs["units"][1], dist,
+            target_x=5, target_y=6,
+            unit_x=7, unit_y=7, unit_facing=4,
+        )
+        assert flat[move_offset + 7] == pytest.approx(expected)
+        assert expected != 0.0
+
+    def test_terrain_cover_feature(self):
+        """Cover value at move destination."""
+        hexes = [
+            {"x": 5, "y": 6, "elevation": 0, "terrain": "Light Woods"},
+            {"x": 6, "y": 7, "elevation": 0},
+        ]
+        obs = _make_obs(hexes=hexes)
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        # Move 0 dest (5,6) is Light Woods → cover_value=1.0, normalized /2.0 = 0.5
+        assert flat[move_offset + 8] == pytest.approx(0.5)
+        # Move 1 dest (6,7) has no terrain → 0.0
+        m1 = move_offset + MOVE_FEATURES
+        assert flat[m1 + 8] == pytest.approx(0.0)
+
+    def test_elevation_diff_feature(self):
+        """Elevation difference between move dest and enemy position."""
+        hexes = [
+            {"x": 5, "y": 6, "elevation": 3},
+            {"x": 10, "y": 12, "elevation": 1},  # enemy hex
+        ]
+        obs = _make_obs(hexes=hexes)
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        # Move 0 dest (5,6) elev=3, enemy (10,12) elev=1 → diff=2, /10 = 0.2
+        assert flat[move_offset + 9] == pytest.approx(0.2)
+
+    def test_tactical_features_no_enemy(self):
+        """When enemy is missing, tactical features default to 0."""
+        obs = _make_obs()
+        obs["units"] = [obs["units"][0]]  # remove enemy
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        # All 5 tactical features should be 0.0
+        for feat_idx in range(5, 10):
+            assert flat[move_offset + feat_idx] == 0.0
+
+    def test_tactical_features_padding_zeros(self):
+        """Unused move slots should have zero tactical features."""
+        obs = _make_obs()
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        # Slots 2..9 should be all zeros
+        pad_start = move_offset + 2 * MOVE_FEATURES
+        pad_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
+        np.testing.assert_array_equal(flat[pad_start:pad_end], 0.0)
 
 
 class TestIdentifyRlOwner:

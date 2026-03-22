@@ -28,7 +28,7 @@ def _set_pdeathsig():
 
 # JVM options matching rlJvmOptions in megamek/build.gradle
 _JVM_OPTIONS = [
-    "-Xmx2048m",
+    "-Xmx512m",
     "--add-opens", "java.base/java.util=ALL-UNNAMED",
     "--add-opens", "java.base/java.util.concurrent=ALL-UNNAMED",
     "-Dlog4j2.configurationFile=mmconf/log4j2-rl.xml",
