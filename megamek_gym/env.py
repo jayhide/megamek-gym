@@ -194,6 +194,7 @@ class MegaMekEnv(gymnasium.Env):
             perf_log=cfg.perf_log,
             opponent_type=cfg.opponent_type,
             force_gc=cfg.force_gc,
+            mem_log=cfg.mem_log,
         )
         self._java.start()
 

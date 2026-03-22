@@ -45,6 +45,7 @@ class MegaMekConfig:
     perf_log: bool = False
     opponent_type: str = "princess"
     force_gc: bool = False
+    mem_log: int = 0
 
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"

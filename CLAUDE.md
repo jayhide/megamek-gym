@@ -37,7 +37,7 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
         └── Sends action index                                  └── Translates index → MovePath
 ```
 
-- **Observation space**: `Box(shape=(W*H + 111 + max_legal_moves * 6,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55) + global features (1) + move features (max_legal_moves × 6). Default board (16x17) with 400 max moves gives 2783. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). The 6 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `jumping` (bool), `prone` (bool). Unused slots (index >= n_legal_moves) are zero-padded.
+- **Observation space**: `Box(shape=(W*H + 111 + max_legal_moves * 10,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55) + global features (1) + move features (max_legal_moves × 10). Default board (16x17) with 400 max moves gives 4383. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). The 10 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `prone` (bool), `dist_to_enemy/max(W,H)`, `range_quality` (RL weapon effectiveness from dest, arc-aware, [-0.5,1.0]), `enemy_range_quality` (enemy weapon effectiveness at this distance, arc-aware, [-0.5,1.0]), `terrain_cover/2` (Light Woods=0.5, Heavy Woods=1.0), `elevation_diff/10` (dest elevation minus enemy elevation). Tactical features default to 0.0 when the enemy is missing/undeployed. Unused slots (index >= n_legal_moves) are zero-padded.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
 - **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 0.05x Cover + 0.5x PronePenalty + 5x WinLoss). DamageDelta weights internal structure damage at 2x armor and normalizes by 20 (so a 20-damage hit = reward 1.0). LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage scores how well each side's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages, then rewards the difference (RL quality − enemy quality). Weapons outside their firing arc (based on unit facing and weapon location) have their range score multiplied by 0.5 — they still contribute for being at favorable distance but at reduced value since they can't fire this turn. Firing arcs follow standard BattleTech rules: forward arc (±90° from facing) for torso/head/leg weapons, extended 240° arcs for arm weapons. Cover rewards the RL unit for positioning in terrain with to-hit modifiers (Light Woods=1.0, Heavy Woods=2.0); only RL cover is scored since the agent can't control enemy positioning. PronePenalty applies -1.0 when the RL unit transitions from not-prone to prone (all such transitions are involuntary falls since the Java move enumeration never offers "go prone").
 
@@ -62,7 +62,7 @@ The Java side lives at:
 
 **Gradle task** in `megamek/build.gradle` (~line 596):
 ```
-./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC"
+./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog"
 ```
 Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
@@ -102,6 +102,7 @@ smoke_test_all.py        # Consolidated smoke test — run after any RL bridge c
 smoke_test.py            # Quick single-episode integration test with live Java process
 smoke_test_truncation.py # Tests max_game_rounds truncation (RL bot stands still)
 perf_test.py             # Multi-env startup timing and diagnostics
+mem_benchmark.py         # Measure memory usage across N parallel environments
 train_ppo.py             # CleanRL-style PPO training script
 eval.py                  # Evaluation script for trained checkpoints
 clean_saves.py           # Delete training artifacts (saves, run dirs, logs, heap dumps)
@@ -261,6 +262,22 @@ poetry run python perf_test.py --megamek-dir ../megamek --num-envs 4 --mode stag
 ```
 
 Reports per-env timing breakdown (Java start, socket connect, first observation) and diagnoses bottlenecks. Connection timeout is configurable via `connection_retries` and `connection_retry_delay` in config.
+
+## Memory Benchmarking
+
+Use `mem_benchmark.py` to measure actual memory consumption across different numbers of parallel environments:
+
+```bash
+# Test 1, 2, 4, and 8 envs (default)
+poetry run python mem_benchmark.py --megamek-dir ../megamek --env-counts 1,2,4,8
+
+# Quick test with fewer episodes and shorter games
+poetry run python mem_benchmark.py --megamek-dir ../megamek --env-counts 1,2 --episodes-per-env 2 --max-game-rounds 5
+```
+
+For each env count, starts N environments, runs a few episodes to stabilize memory, then measures per-JVM RSS (actual resident memory from `/proc`), JVM heap usage (from `[rl-mem]` log lines), and Python process RSS. Reports a summary table.
+
+The `mem_log` config field (default 0) controls Java-side memory logging verbosity: 0=off, 1=basic heap+delta, 2=pool breakdown, 3=class histogram. The benchmark enables level 1 automatically.
 
 ## Debugging Java Errors
 

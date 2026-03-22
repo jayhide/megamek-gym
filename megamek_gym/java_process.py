@@ -64,6 +64,7 @@ class JavaProcess:
         perf_log: bool = False,
         opponent_type: str = "princess",
         force_gc: bool = False,
+        mem_log: int = 0,
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -81,6 +82,7 @@ class JavaProcess:
         self.perf_log = perf_log
         self.opponent_type = opponent_type
         self.force_gc = force_gc
+        self.mem_log = mem_log
         self._process: subprocess.Popen | None = None
         self._stderr_file = None
 
@@ -165,6 +167,7 @@ class JavaProcess:
             str(self.perf_log).lower(),
             self.opponent_type,
             str(self.force_gc).lower(),
+            str(self.mem_log),
         ]
         cmd = [
             "java",
