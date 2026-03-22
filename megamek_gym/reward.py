@@ -265,6 +265,11 @@ def hex_bearing(x1: int, y1: int, x2: int, y2: int) -> float:
 def in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
     """Check if a weapon can fire at a target given the unit's facing and bearing.
 
+    Replicates Java's FacingArc + UnitPosition.relativeDotProduct logic exactly:
+    1. Round bearing to nearest integer degree (matches Coords.dotProduct)
+    2. Compute relative angle = (bearing_int - facing_angle) % 360
+    3. Apply FacingArc boundary checks with same >= / <= / > / < operators
+
     Args:
         facing: Unit facing (0-5), where 0=North, 1=NE, etc.
         weapon_location: MegaMek location index (0=HD, 1=CT, 2=RT, 3=LT, 4=RA, 5=LA, 6=RL, 7=LL)
@@ -272,34 +277,22 @@ def in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
 
     Returns:
         True if the weapon can fire at the target.
-
-    Firing arcs (standard BattleMech, matching MegaMek's FacingArc):
-        Forward (HD, CT, RT, LT, legs): ±60° from facing direction (120° cone)
-        Right arm (RA=4): 60° left to 120° right of facing (180° cone)
-        Left arm (LA=5): 120° left to 60° right of facing (180° cone)
     """
-    facing_deg = facing * 60.0
+    # Java's Coords.dotProduct rounds to int; relativeDotProduct subtracts facing
+    bearing_int = round(bearing)
+    facing_angle = facing * 60
+    target = (bearing_int - facing_angle) % 360
 
-    # Angle difference: how far the bearing is from facing direction
-    diff = (bearing - facing_deg) % 360
-    if diff > 180:
-        diff = 360 - diff
-
-    # Forward arc: within 60° of facing
-    if diff <= 60:
-        return True
-
-    # Arm arcs extend 60° further on their side (total 120° on that side)
-    if weapon_location == 4:  # RA — extends to 120° clockwise from facing
-        right_diff = (bearing - facing_deg) % 360
-        if right_diff <= 120:
-            return True
-    elif weapon_location == 5:  # LA — extends to 120° counter-clockwise from facing
-        left_diff = (facing_deg - bearing) % 360
-        if left_diff <= 120:
-            return True
-
-    return False
+    # FacingArc definitions from FacingArc.java (start, end, condition):
+    #   ARC_FORWARD(1):   300, 60  -> target >= 300 || target <= 60
+    #   ARC_LEFT_ARM(2):  240, 60  -> target >= 240 || target <= 60
+    #   ARC_RIGHT_ARM(3): 300, 120 -> target >= 300 || target <= 120
+    if weapon_location == 4:  # RA -> ARC_RIGHT_ARM
+        return target >= 300 or target <= 120
+    elif weapon_location == 5:  # LA -> ARC_LEFT_ARM
+        return target >= 240 or target <= 60
+    else:  # HD, CT, RT, LT, RL, LL -> ARC_FORWARD
+        return target >= 300 or target <= 60
 
 
 def range_quality(unit: dict, distance: int,
