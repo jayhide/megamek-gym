@@ -20,7 +20,7 @@ Always use `poetry run python` instead of bare `python`.
 poetry run python smoke_test_all.py --megamek-dir ../megamek
 ```
 
-Tests: basic episode, truncation signal, termination signal, persistent reset. ~2-3 min. Exit 0 = all pass. Use `--verbose` for per-step output.
+Tests: basic episode, truncation signal, termination signal, persistent reset, Python-vs-Java cross-validation. ~2-3 min. Exit 0 = all pass. Use `--verbose` for per-step output.
 
 The older `smoke_test.py` and `smoke_test_truncation.py` are kept for quick manual debugging but are superseded by `smoke_test_all.py`.
 
@@ -39,7 +39,7 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
 
 - **Observation space**: `Box(shape=(W*H + 111 + max_legal_moves * 10,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55) + global features (1) + move features (max_legal_moves × 10). Default board (16x17) with 400 max moves gives 4383. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). The 10 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `prone` (bool), `dist_to_enemy/max(W,H)`, `range_quality` (RL weapon effectiveness from dest, arc-aware, [-0.5,1.0]), `enemy_range_quality` (enemy weapon effectiveness at this distance, arc-aware, [-0.5,1.0]), `terrain_cover/2` (Light Woods=0.5, Heavy Woods=1.0), `elevation_diff/10` (dest elevation minus enemy elevation). Tactical features default to 0.0 when the enemy is missing/undeployed. Unused slots (index >= n_legal_moves) are zero-padded.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
-- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 0.05x Cover + 0.5x PronePenalty + 5x WinLoss). DamageDelta weights internal structure damage at 2x armor and normalizes by 20 (so a 20-damage hit = reward 1.0). LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage scores how well each side's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages, then rewards the difference (RL quality − enemy quality). Weapons outside their firing arc (based on unit facing and weapon location) have their range score multiplied by 0.5 — they still contribute for being at favorable distance but at reduced value since they can't fire this turn. Firing arcs follow standard BattleTech rules: forward arc (±90° from facing) for torso/head/leg weapons, extended 240° arcs for arm weapons. Cover rewards the RL unit for positioning in terrain with to-hit modifiers (Light Woods=1.0, Heavy Woods=2.0); only RL cover is scored since the agent can't control enemy positioning. PronePenalty applies -1.0 when the RL unit transitions from not-prone to prone (all such transitions are involuntary falls since the Java move enumeration never offers "go prone").
+- **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 0.05x Cover + 0.5x PronePenalty + 5x WinLoss). DamageDelta weights internal structure damage at 2x armor and normalizes by 20 (so a 20-damage hit = reward 1.0). LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage scores how well each side's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages, then rewards the difference (RL quality − enemy quality). Weapons outside their firing arc (based on unit facing and weapon location) have their range score multiplied by 0.5 — they still contribute for being at favorable distance but at reduced value since they can't fire this turn. Firing arcs match MegaMek's `FacingArc` system: forward arc (±60° from facing, 120° cone) for torso/head/leg weapons, arm arcs extend 60° further on their side (180° cone each). Cross-validated against Java's `ComputeArc.isInArc` via smoke test. Cover rewards the RL unit for positioning in terrain with to-hit modifiers (Light Woods=1.0, Heavy Woods=2.0); only RL cover is scored since the agent can't control enemy positioning. PronePenalty applies -1.0 when the RL unit transitions from not-prone to prone (all such transitions are involuntary falls since the Java move enumeration never offers "go prone").
 
 ## Dependencies on `../megamek` Repo
 
@@ -94,9 +94,10 @@ configs/
 └── quick_test.yaml      # Fast smoke test settings
 
 tests/
-├── test_config.py       # Config parsing, validation, and YAML roundtrip tests
-├── test_observation.py  # Observation flattening correctness tests
-└── test_reward.py       # Reward function logic tests
+├── test_config.py            # Config parsing, validation, and YAML roundtrip tests
+├── test_cross_validation.py  # Python-vs-Java cross-validation (hex distance, firing arcs)
+├── test_observation.py       # Observation flattening correctness tests
+└── test_reward.py            # Reward function logic tests
 
 smoke_test_all.py        # Consolidated smoke test — run after any RL bridge changes
 smoke_test.py            # Quick single-episode integration test with live Java process

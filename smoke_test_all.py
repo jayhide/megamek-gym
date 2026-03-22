@@ -5,10 +5,11 @@ Covers all critical integration paths between Python (megamek-gym) and Java (meg
 Auto-starts Java via the Gymnasium env — no manual two-terminal setup needed.
 
 Tests:
-  1. Basic Episode    — reset, random moves, game ends, obs shape correct
-  2. Truncation       — low round limit triggers truncated=True
-  3. Termination      — natural game end triggers terminated=True
-  4. Persistent Reset — 3 episodes on same JVM without cold restart
+  1. Basic Episode      — reset, random moves, game ends, obs shape correct
+  2. Truncation         — low round limit triggers truncated=True
+  3. Termination        — natural game end triggers terminated=True
+  4. Persistent Reset   — 3 episodes on same JVM without cold restart
+  5. Cross-Validation   — Python tactical features match Java calculations
 
 Usage:
     poetry run python smoke_test_all.py [--megamek-dir ../megamek] [--port 9999] [--verbose]
@@ -30,6 +31,7 @@ import numpy as np
 import megamek_gym  # noqa: F401 — registers MegaMekGym/MegaMek-v0
 from megamek_gym.config import MegaMekConfig
 from megamek_gym.observation import compute_obs_size
+from tests.test_cross_validation import validate_observation
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,60 @@ def test_termination(megamek_dir, port, verbose):
         env.close()
 
 
+def test_cross_validation(megamek_dir, port, verbose):
+    """Cross-validation: compare Python tactical features against Java."""
+    config = MegaMekConfig(
+        megamek_dir=megamek_dir,
+        rl_port=port,
+        max_game_rounds=50,
+        firing_strategy="naive",
+        max_rotating_round_saves=0,
+        perf_log=True,
+    )
+
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+    try:
+        obs, info = env.reset()
+        inner = env.unwrapped
+        all_mismatches = []
+        total_moves_checked = 0
+        step = 0
+
+        while True:
+            raw_obs = inner._last_raw_obs
+            if raw_obs and raw_obs.get("legal_moves"):
+                mismatches = validate_observation(raw_obs, inner._rl_owner_id)
+                total_moves_checked += len(raw_obs["legal_moves"])
+                if mismatches:
+                    all_mismatches.extend(mismatches)
+                    if verbose:
+                        for m in mismatches:
+                            print(f"    MISMATCH: {m}")
+
+            n_legal = info.get("n_legal_moves", 0)
+            action = np.random.randint(0, max(n_legal, 1))
+            obs, reward, terminated, truncated, info = env.step(action)
+            step += 1
+
+            if terminated or truncated:
+                break
+            if step >= 500:
+                raise RuntimeError("Episode did not end after 500 steps")
+
+        if all_mismatches:
+            return False, (
+                f"{len(all_mismatches)} mismatches in {total_moves_checked} moves "
+                f"({step} steps). First: {all_mismatches[0]}"
+            )
+
+        return True, (
+            f"{step} steps, {total_moves_checked} moves checked, "
+            f"0 mismatches"
+        )
+    finally:
+        env.close()
+
+
 def test_persistent_reset(megamek_dir, port, verbose):
     """Persistent reset: 3 episodes on same JVM without cold restart."""
     config = MegaMekConfig(
@@ -255,6 +311,7 @@ TESTS = [
     ("Truncation", test_truncation, 1),
     ("Termination", test_termination, 2),
     ("Persistent Reset", test_persistent_reset, 3),
+    ("Cross-Validation", test_cross_validation, 4),
 ]
 
 

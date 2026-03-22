@@ -216,21 +216,24 @@ class LocationDestructionReward(RewardFunction):
 
 
 def _to_cube(x: int, y: int) -> tuple[int, int, int]:
-    """Convert even-column offset coordinates to cube coordinates."""
+    """Convert odd-q offset coordinates to cube coordinates (MegaMek convention).
+
+    MegaMek uses odd-column offset: odd columns are shifted down by half a hex.
+    """
     q = x
-    r = y - (x + (x & 1)) // 2
+    r = y - (x - (x & 1)) // 2
     s = -q - r
     return q, r, s
 
 
-def _hex_distance(x1: int, y1: int, x2: int, y2: int) -> int:
-    """Hex distance using offset coordinates (even-column offset, MegaMek convention)."""
+def hex_distance(x1: int, y1: int, x2: int, y2: int) -> int:
+    """Hex distance using offset coordinates (odd-q offset, MegaMek convention)."""
     q1, r1, s1 = _to_cube(x1, y1)
     q2, r2, s2 = _to_cube(x2, y2)
     return (abs(q1 - q2) + abs(r1 - r2) + abs(s1 - s2)) // 2
 
 
-def _hex_bearing(x1: int, y1: int, x2: int, y2: int) -> float:
+def hex_bearing(x1: int, y1: int, x2: int, y2: int) -> float:
     """Compass bearing in degrees (0=North, clockwise) from hex (x1,y1) to (x2,y2).
 
     Uses cube coordinates converted to Cartesian pixel positions for flat-top hexes.
@@ -259,7 +262,7 @@ def _hex_bearing(x1: int, y1: int, x2: int, y2: int) -> float:
     return angle_deg
 
 
-def _in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
+def in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
     """Check if a weapon can fire at a target given the unit's facing and bearing.
 
     Args:
@@ -270,10 +273,10 @@ def _in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
     Returns:
         True if the weapon can fire at the target.
 
-    Firing arcs (standard BattleMech):
-        Forward (HD, CT, RT, LT, legs): ±90° from facing direction (180° cone)
-        Right arm (RA=4): forward arc + 60° to the right (240° cone)
-        Left arm (LA=5): forward arc + 60° to the left (240° cone)
+    Firing arcs (standard BattleMech, matching MegaMek's FacingArc):
+        Forward (HD, CT, RT, LT, legs): ±60° from facing direction (120° cone)
+        Right arm (RA=4): 60° left to 120° right of facing (180° cone)
+        Left arm (LA=5): 120° left to 60° right of facing (180° cone)
     """
     facing_deg = facing * 60.0
 
@@ -282,26 +285,24 @@ def _in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
     if diff > 180:
         diff = 360 - diff
 
-    # Forward arc: within 90° of facing
-    if diff <= 90:
+    # Forward arc: within 60° of facing
+    if diff <= 60:
         return True
 
-    # Arm arcs get extra 60° on their side
-    if weapon_location == 4:  # RA — extends 60° to the right
-        # Check if bearing is within 150° clockwise from facing
+    # Arm arcs extend 60° further on their side (total 120° on that side)
+    if weapon_location == 4:  # RA — extends to 120° clockwise from facing
         right_diff = (bearing - facing_deg) % 360
-        if right_diff <= 150:
+        if right_diff <= 120:
             return True
-    elif weapon_location == 5:  # LA — extends 60° to the left
-        # Check if bearing is within 150° counter-clockwise from facing
+    elif weapon_location == 5:  # LA — extends to 120° counter-clockwise from facing
         left_diff = (facing_deg - bearing) % 360
-        if left_diff <= 150:
+        if left_diff <= 120:
             return True
 
     return False
 
 
-def _range_quality(unit: dict, distance: int,
+def range_quality(unit: dict, distance: int,
                    target_x: int | None = None, target_y: int | None = None,
                    unit_x: int | None = None, unit_y: int | None = None,
                    unit_facing: int | None = None) -> float:
@@ -323,7 +324,7 @@ def _range_quality(unit: dict, distance: int,
     bearing = None
     if (unit_facing is not None and unit_x is not None and unit_y is not None
             and target_x is not None and target_y is not None):
-        bearing = _hex_bearing(unit_x, unit_y, target_x, target_y)
+        bearing = hex_bearing(unit_x, unit_y, target_x, target_y)
 
     total_score = 0.0
     total_damage = 0.0
@@ -352,7 +353,7 @@ def _range_quality(unit: dict, distance: int,
         # Apply out-of-arc penalty
         if bearing is not None:
             weapon_loc = w.get("location", 1)  # default CT (always in forward arc)
-            if not _in_firing_arc(unit_facing, weapon_loc, bearing):
+            if not in_firing_arc(unit_facing, weapon_loc, bearing):
                 score *= 0.5
 
         total_score += score * damage
@@ -399,18 +400,18 @@ class RangeAdvantageReward(RewardFunction):
 
         rl_x, rl_y = rl_unit["x"], rl_unit["y"]
         ex, ey = enemy_unit["x"], enemy_unit["y"]
-        dist = _hex_distance(rl_x, rl_y, ex, ey)
+        dist = hex_distance(rl_x, rl_y, ex, ey)
 
         rl_facing = rl_unit.get("facing")
         enemy_facing = enemy_unit.get("facing")
 
-        rl_quality = _range_quality(
+        rl_quality = range_quality(
             rl_unit, dist,
             target_x=ex, target_y=ey,
             unit_x=rl_x, unit_y=rl_y,
             unit_facing=rl_facing,
         )
-        enemy_quality = _range_quality(
+        enemy_quality = range_quality(
             enemy_unit, dist,
             target_x=rl_x, target_y=rl_y,
             unit_x=ex, unit_y=ey,
@@ -426,7 +427,7 @@ class RangeAdvantageReward(RewardFunction):
         self._rl_owner = owner_id
 
 
-def _cover_value(board_hexes: list[dict], x: int, y: int) -> float:
+def cover_value(board_hexes: list[dict], x: int, y: int) -> float:
     """Return cover value for the hex at (x, y).
 
     Heavy Woods = 2.0 (+2 to-hit), Light Woods = 1.0 (+1 to-hit), else 0.0.
@@ -473,7 +474,7 @@ class CoverReward(RewardFunction):
             return 0.0
 
         board_hexes = curr_obs.get("board", {}).get("hexes", [])
-        rl_cover = _cover_value(board_hexes, rl_unit["x"], rl_unit["y"])
+        rl_cover = cover_value(board_hexes, rl_unit["x"], rl_unit["y"])
         return self.scale * rl_cover
 
     def reset(self) -> None:

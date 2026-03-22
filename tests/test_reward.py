@@ -5,8 +5,8 @@ import pytest
 from megamek_gym.reward import (
     CompositeReward, CoverReward, DamageDeltaReward, LocationDestructionReward,
     PronePenaltyReward, RangeAdvantageReward, WinLossReward,
-    _cover_value, _get_prone_status, _hex_bearing, _hex_distance,
-    _in_firing_arc, _range_quality,
+    cover_value, _get_prone_status, hex_bearing, hex_distance,
+    in_firing_arc, range_quality,
 )
 
 
@@ -330,53 +330,53 @@ class TestCompositeReward:
 
 class TestHexDistance:
     def test_same_hex(self):
-        assert _hex_distance(3, 4, 3, 4) == 0
+        assert hex_distance(3, 4, 3, 4) == 0
 
     def test_adjacent(self):
         # Even column (0): neighbors of (0,0) include (1,0), (0,1), (1,-1) etc.
-        assert _hex_distance(0, 0, 1, 0) == 1
-        assert _hex_distance(0, 0, 0, 1) == 1
+        assert hex_distance(0, 0, 1, 0) == 1
+        assert hex_distance(0, 0, 0, 1) == 1
 
     def test_known_distance(self):
         # (0,0) to (2,2): cube(0,0)=(0,0,0), cube(2,2)=(2,1,-3) → dist=3
-        assert _hex_distance(0, 0, 2, 2) == 3
+        assert hex_distance(0, 0, 2, 2) == 3
 
     def test_symmetric(self):
-        assert _hex_distance(1, 3, 5, 7) == _hex_distance(5, 7, 1, 3)
+        assert hex_distance(1, 3, 5, 7) == hex_distance(5, 7, 1, 3)
 
     def test_odd_column_offset(self):
         # Odd column (1): (1,0) to (2,0) should be 1
-        assert _hex_distance(1, 0, 2, 0) == 1
+        assert hex_distance(1, 0, 2, 0) == 1
 
 
 # --- Hex bearing helper ---
 
 class TestHexBearing:
     def test_same_hex(self):
-        assert _hex_bearing(3, 3, 3, 3) == 0.0
+        assert hex_bearing(3, 3, 3, 3) == 0.0
 
     def test_due_north(self):
         # (5, 5) to (5, 3) — straight up (decreasing y = north)
-        bearing = _hex_bearing(5, 5, 5, 3)
+        bearing = hex_bearing(5, 5, 5, 3)
         assert bearing == pytest.approx(0.0, abs=1.0)
 
     def test_due_south(self):
-        bearing = _hex_bearing(5, 3, 5, 5)
+        bearing = hex_bearing(5, 3, 5, 5)
         assert bearing == pytest.approx(180.0, abs=1.0)
 
     def test_northeast(self):
         # Moving right and up in hex grid — bearing should be roughly 0-90°
-        bearing = _hex_bearing(4, 4, 5, 3)
+        bearing = hex_bearing(4, 4, 5, 3)
         assert 0 < bearing < 90
 
     def test_southeast(self):
-        bearing = _hex_bearing(4, 4, 5, 5)
+        bearing = hex_bearing(4, 4, 5, 5)
         assert 90 < bearing < 180
 
     def test_symmetry(self):
         """Bearing from A→B and B→A should differ by ~180°."""
-        b1 = _hex_bearing(2, 3, 5, 1)
-        b2 = _hex_bearing(5, 1, 2, 3)
+        b1 = hex_bearing(2, 3, 5, 1)
+        b2 = hex_bearing(5, 1, 2, 3)
         diff = abs(b1 - b2)
         if diff > 180:
             diff = 360 - diff
@@ -388,51 +388,54 @@ class TestHexBearing:
 class TestInFiringArc:
     def test_forward_weapon_facing_north_target_north(self):
         """CT weapon, facing 0 (north), target due north → in arc."""
-        assert _in_firing_arc(0, 1, 0.0) is True
+        assert in_firing_arc(0, 1, 0.0) is True
 
     def test_forward_weapon_facing_north_target_east(self):
-        """CT weapon, facing 0 (north), target 90° east → exactly at boundary."""
-        assert _in_firing_arc(0, 1, 90.0) is True
+        """CT weapon, facing 0 (north), target 90° east → outside forward arc (±60°)."""
+        assert in_firing_arc(0, 1, 90.0) is False
+
+    def test_forward_weapon_facing_north_target_ne(self):
+        """CT weapon, facing 0 (north), target 60° NE → exactly at boundary."""
+        assert in_firing_arc(0, 1, 60.0) is True
 
     def test_forward_weapon_facing_north_target_behind(self):
         """CT weapon, facing 0 (north), target 180° south → behind, out of arc."""
-        assert _in_firing_arc(0, 1, 180.0) is False
+        assert in_firing_arc(0, 1, 180.0) is False
 
     def test_right_arm_extends_right(self):
-        """RA (loc 4), facing 0 (north), target 120° → forward arc misses but RA arc covers."""
-        # Forward arc of facing 0 covers 270°-90°. 120° is outside.
-        # RA extends 60° to the right: covers up to 150° clockwise from facing.
-        assert _in_firing_arc(0, 4, 120.0) is True
+        """RA (loc 4), facing 0 (north), target 120° → at RA boundary (120° right)."""
+        # Forward arc covers ±60°. RA extends to 120° clockwise from facing.
+        assert in_firing_arc(0, 4, 120.0) is True
 
     def test_right_arm_limit(self):
-        """RA (loc 4), facing 0 (north), target 160° → outside even RA arc."""
-        assert _in_firing_arc(0, 4, 160.0) is False
+        """RA (loc 4), facing 0 (north), target 160° → outside even RA arc (>120°)."""
+        assert in_firing_arc(0, 4, 160.0) is False
 
     def test_left_arm_extends_left(self):
-        """LA (loc 5), facing 0 (north), target 240° → forward arc misses but LA arc covers."""
-        assert _in_firing_arc(0, 5, 240.0) is True
+        """LA (loc 5), facing 0 (north), target 240° → at LA boundary (120° left)."""
+        assert in_firing_arc(0, 5, 240.0) is True
 
     def test_left_arm_limit(self):
-        """LA (loc 5), facing 0 (north), target 200° → outside even LA arc."""
-        assert _in_firing_arc(0, 5, 200.0) is False
+        """LA (loc 5), facing 0 (north), target 200° → outside even LA arc (>120° left)."""
+        assert in_firing_arc(0, 5, 200.0) is False
 
     def test_facing_3_south(self):
         """Facing 3 (south = 180°), CT weapon, target due south → in arc."""
-        assert _in_firing_arc(3, 1, 180.0) is True
+        assert in_firing_arc(3, 1, 180.0) is True
 
     def test_facing_3_north_behind(self):
         """Facing 3 (south = 180°), CT weapon, target due north → behind."""
-        assert _in_firing_arc(3, 1, 0.0) is False
+        assert in_firing_arc(3, 1, 0.0) is False
 
     def test_head_same_as_forward(self):
         """HD (loc 0) uses forward arc."""
-        assert _in_firing_arc(0, 0, 45.0) is True
-        assert _in_firing_arc(0, 0, 180.0) is False
+        assert in_firing_arc(0, 0, 45.0) is True
+        assert in_firing_arc(0, 0, 180.0) is False
 
     def test_leg_same_as_forward(self):
         """Legs (loc 6, 7) use forward arc."""
-        assert _in_firing_arc(0, 6, 45.0) is True
-        assert _in_firing_arc(0, 7, 180.0) is False
+        assert in_firing_arc(0, 6, 45.0) is True
+        assert in_firing_arc(0, 7, 180.0) is False
 
 
 # --- Range quality helper ---
@@ -446,23 +449,23 @@ def _weapon(damage, short, medium, long, min_range=0, destroyed=False, location=
 class TestRangeQuality:
     def test_short_range(self):
         unit = {"weapons": [_weapon(5, 3, 6, 9)]}
-        assert _range_quality(unit, 2) == pytest.approx(1.0)
+        assert range_quality(unit, 2) == pytest.approx(1.0)
 
     def test_medium_range(self):
         unit = {"weapons": [_weapon(5, 3, 6, 9)]}
-        assert _range_quality(unit, 5) == pytest.approx(0.5)
+        assert range_quality(unit, 5) == pytest.approx(0.5)
 
     def test_long_range(self):
         unit = {"weapons": [_weapon(5, 3, 6, 9)]}
-        assert _range_quality(unit, 8) == pytest.approx(0.0)
+        assert range_quality(unit, 8) == pytest.approx(0.0)
 
     def test_out_of_range(self):
         unit = {"weapons": [_weapon(5, 3, 6, 9)]}
-        assert _range_quality(unit, 15) == pytest.approx(-0.5)
+        assert range_quality(unit, 15) == pytest.approx(-0.5)
 
     def test_below_min_range(self):
         unit = {"weapons": [_weapon(10, 6, 12, 18, min_range=3)]}
-        assert _range_quality(unit, 1) == pytest.approx(-0.5)
+        assert range_quality(unit, 1) == pytest.approx(-0.5)
 
     def test_damage_weighted_average(self):
         # Weapon A: damage=10, short=3 → at dist 2: short → 1.0
@@ -472,19 +475,19 @@ class TestRangeQuality:
             _weapon(10, 3, 6, 9),   # distance 2 → short → 1.0
             _weapon(5, 1, 2, 3),    # distance 2 → medium → 0.5
         ]}
-        assert _range_quality(unit, 2) == pytest.approx(12.5 / 15)
+        assert range_quality(unit, 2) == pytest.approx(12.5 / 15)
 
     def test_all_weapons_destroyed(self):
         unit = {"weapons": [_weapon(5, 3, 6, 9, destroyed=True)]}
-        assert _range_quality(unit, 2) == 0.0
+        assert range_quality(unit, 2) == 0.0
 
     def test_no_weapons(self):
         unit = {"weapons": []}
-        assert _range_quality(unit, 5) == 0.0
+        assert range_quality(unit, 5) == 0.0
 
     def test_zero_damage_weapon_ignored(self):
         unit = {"weapons": [_weapon(0, 3, 6, 9), _weapon(5, 3, 6, 9)]}
-        assert _range_quality(unit, 2) == pytest.approx(1.0)
+        assert range_quality(unit, 2) == pytest.approx(1.0)
 
 
 # --- Range quality with facing ---
@@ -494,9 +497,9 @@ class TestRangeQualityWithFacing:
         """CT weapon facing toward target — same score as without facing."""
         unit = {"weapons": [_weapon(5, 3, 6, 9, location=1)]}  # CT
         # Without facing
-        score_no_facing = _range_quality(unit, 2)
+        score_no_facing = range_quality(unit, 2)
         # With facing 0 (north), target due north at (5, 3) from (5, 5)
-        score_facing = _range_quality(unit, 2, target_x=5, target_y=3,
+        score_facing = range_quality(unit, 2, target_x=5, target_y=3,
                                        unit_x=5, unit_y=5, unit_facing=0)
         assert score_no_facing == pytest.approx(1.0)
         assert score_facing == pytest.approx(1.0)
@@ -505,7 +508,7 @@ class TestRangeQualityWithFacing:
         """CT weapon facing away from target — score halved."""
         unit = {"weapons": [_weapon(5, 3, 6, 9, location=1)]}  # CT
         # Facing 3 (south = 180°), target is north at (5, 3) from (5, 5)
-        score = _range_quality(unit, 2, target_x=5, target_y=3,
+        score = range_quality(unit, 2, target_x=5, target_y=3,
                                 unit_x=5, unit_y=5, unit_facing=3)
         # Normal short-range score is 1.0, halved to 0.5
         assert score == pytest.approx(0.5)
@@ -540,7 +543,7 @@ class TestRangeQualityWithFacing:
             _weapon(10, 3, 6, 9, location=1),  # CT — out of forward arc at 180°
             _weapon(5, 3, 6, 9, location=4),   # RA — in extended arc at 180°
         ]}
-        score = _range_quality(unit_facing1, 2, target_x=5, target_y=7,
+        score = range_quality(unit_facing1, 2, target_x=5, target_y=7,
                                 unit_x=5, unit_y=5, unit_facing=1)
         # CT: short range = 1.0 * 0.5 (out of arc) = 0.5, weight 10
         # RA: short range = 1.0 (in arc), weight 5
@@ -550,7 +553,7 @@ class TestRangeQualityWithFacing:
     def test_backward_compat_no_facing(self):
         """Without facing args, behaves identically to old version."""
         unit = {"weapons": [_weapon(5, 3, 6, 9, location=1)]}
-        assert _range_quality(unit, 2) == pytest.approx(1.0)
+        assert range_quality(unit, 2) == pytest.approx(1.0)
 
 
 # --- RangeAdvantageReward ---
@@ -716,23 +719,23 @@ class TestRangeAdvantageReward:
 class TestCoverValue:
     def test_light_woods(self):
         hexes = [{"x": 3, "y": 4, "terrain": "Level: 1  Features: Light Woods; "}]
-        assert _cover_value(hexes, 3, 4) == 1.0
+        assert cover_value(hexes, 3, 4) == 1.0
 
     def test_heavy_woods(self):
         hexes = [{"x": 3, "y": 4, "terrain": "Level: 1  Features: Heavy Woods; "}]
-        assert _cover_value(hexes, 3, 4) == 2.0
+        assert cover_value(hexes, 3, 4) == 2.0
 
     def test_clear(self):
         hexes = [{"x": 3, "y": 4, "terrain": "Level: 0  Features: ; "}]
-        assert _cover_value(hexes, 3, 4) == 0.0
+        assert cover_value(hexes, 3, 4) == 0.0
 
     def test_rough_no_cover(self):
         hexes = [{"x": 3, "y": 4, "terrain": "Level: 1  Features: Rough; "}]
-        assert _cover_value(hexes, 3, 4) == 0.0
+        assert cover_value(hexes, 3, 4) == 0.0
 
     def test_hex_not_found(self):
         hexes = [{"x": 0, "y": 0, "terrain": "Level: 1  Features: Light Woods; "}]
-        assert _cover_value(hexes, 5, 5) == 0.0
+        assert cover_value(hexes, 5, 5) == 0.0
 
 
 # --- CoverReward ---
