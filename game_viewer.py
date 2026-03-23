@@ -174,11 +174,21 @@ def play_game(env, agent, device, deterministic, max_steps):
 
 def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose):
     """Build self-contained HTML with hex map + transcript side by side."""
-    # Embed SVGs as JS array
+    # Embed SVGs as JS array, making them scalable
     frames_js = []
     for svg in svgs:
         start = svg.index("<svg")
-        escaped = svg[start:].replace("\\", "\\\\").replace("`", "\\`")
+        svg_content = svg[start:]
+        # Replace fixed width/height with viewBox so SVG scales to container
+        wm = re.search(r'width="([0-9.]+)pt"', svg_content)
+        hm = re.search(r'height="([0-9.]+)pt"', svg_content)
+        if wm and hm:
+            w, h = wm.group(1), hm.group(1)
+            svg_content = re.sub(r'width="[0-9.]+pt"', 'width="100%"', svg_content, count=1)
+            svg_content = re.sub(r'height="[0-9.]+pt"', 'height="100%"', svg_content, count=1)
+            if 'viewBox' not in svg_content:
+                svg_content = svg_content.replace('<svg ', f'<svg viewBox="0 0 {w} {h}" ', 1)
+        escaped = svg_content.replace("\\", "\\\\").replace("`", "\\`")
         frames_js.append(escaped)
     frames_array = ",\n".join(f"`{f}`" for f in frames_js)
 
@@ -215,10 +225,10 @@ def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose):
     display: flex; flex: 1; overflow: hidden;
   }}
   #map-panel {{
-    flex: 3; display: flex; align-items: center; justify-content: center;
+    flex: 5; display: flex; align-items: center; justify-content: center;
     background: white; overflow: auto; padding: 8px;
   }}
-  #map-panel svg {{ max-width: 100%; height: auto; }}
+  #map-panel svg {{ width: 100%; height: 100%; object-fit: contain; }}
   #transcript-panel {{
     flex: 2; overflow-y: auto; padding: 16px; background: #1e1e1e;
     border-left: 2px solid #333; font-size: 13px; line-height: 1.5;
@@ -232,9 +242,11 @@ def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose):
   .round-header:first-child {{ margin-top: 0; }}
   .section-label {{ color: #6ab0de; font-weight: bold; margin-top: 8px; }}
   .initiative {{ color: #888; font-style: italic; }}
-  .combat-hit {{ color: #5cb85c; }}
+  .combat-rl-hit {{ color: #5cb85c; }}
+  .combat-enemy-hit {{ color: #d9534f; }}
   .combat-miss {{ color: #888; }}
-  .damage-line {{ color: #d9534f; }}
+  .damage-rl {{ color: #d9534f; }}
+  .damage-enemy {{ color: #5cb85c; }}
   .unit-status {{ margin: 2px 0; }}
   .unit-name {{ font-weight: bold; }}
   .armor-good {{ color: #5cb85c; }}
@@ -412,7 +424,8 @@ function renderRound(rd, cutoff) {{
     for (const c of rd.combat) {{
       const tohit = c.tohit ? `needs ${{c.tohit}}` : '?';
       const roll = c.roll ? `rolls ${{c.roll}}` : '?';
-      const resultCls = c.result === 'HIT' ? 'combat-hit' : 'combat-miss';
+      const rlAttacks = c.attacker && c.attacker.includes('(RLBot)');
+      const resultCls = c.result === 'HIT' ? (rlAttacks ? 'combat-rl-hit' : 'combat-enemy-hit') : 'combat-miss';
       let extra = '';
       if (c.result === 'HIT' && c.location) extra = ` (${{escHtml(c.location)}})`;
       if (c.result === 'HIT' && c.missiles) extra = ` (${{c.missiles}} missile(s))`;
@@ -424,7 +437,8 @@ function renderRound(rd, cutoff) {{
   if (showVerbose && rd.damage && rd.damage.length > 0) {{
     h += `<div class="section-label">Damage</div>`;
     for (const d of rd.damage) {{
-      h += `<div class="damage-line">${{escHtml(d.entity)}} takes ${{d.amount}} to ${{escHtml(d.location)}}</div>`;
+      const dmgCls = d.entity && d.entity.includes('(RLBot)') ? 'damage-rl' : 'damage-enemy';
+      h += `<div class="${{dmgCls}}">${{escHtml(d.entity)}} takes ${{d.amount}} to ${{escHtml(d.location)}}</div>`;
     }}
   }}
 
