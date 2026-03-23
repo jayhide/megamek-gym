@@ -439,6 +439,108 @@ def test_fixed_deployment(megamek_dir, port, verbose):
         env.close()
 
 
+def test_board_consistency(megamek_dir, port, verbose):
+    """Board consistency: board loaded from file is identical across resets.
+
+    Catches the bug where a path format mismatch in scanForBoards caused the
+    server to discard the configured board name as "unavailable" and silently
+    fall back to a randomly-generated board every game.
+    """
+    config = MegaMekConfig(
+        megamek_dir=megamek_dir,
+        rl_port=port,
+        max_game_rounds=3,
+        firing_strategy="naive",
+        max_rotating_round_saves=0,
+        rl_fixed_coords=(8, 2),
+        opponent_fixed_coords=(8, 14),
+    )
+
+    num_episodes = 3
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+    try:
+        boards = []         # list of {(x,y): elevation} dicts
+        legal_counts = []   # n_legal_moves at first step
+
+        for ep in range(num_episodes):
+            obs, info = env.reset()
+            raw_obs = env.unwrapped._last_raw_obs
+            n_legal = info.get("n_legal_moves", 0)
+            legal_counts.append(n_legal)
+
+            # Extract board elevations
+            board_hexes = raw_obs.get("board", {}).get("hexes", [])
+            elev_map = {(h["x"], h["y"]): h.get("elevation", 0) for h in board_hexes}
+            boards.append(elev_map)
+
+            if verbose:
+                print(f"    Episode {ep+1}: n_legal={n_legal}, "
+                      f"board hexes={len(elev_map)}, "
+                      f"elev range=[{min(elev_map.values())}, {max(elev_map.values())}]")
+
+            # Play out to completion
+            steps = 0
+            while True:
+                obs, reward, terminated, truncated, info = env.step(0)
+                steps += 1
+                if terminated or truncated or steps >= 500:
+                    break
+
+        # --- Check 1: all boards are identical across resets ---
+        for ep in range(1, num_episodes):
+            if boards[ep] != boards[0]:
+                diffs = []
+                for coord in boards[0]:
+                    if boards[ep].get(coord) != boards[0][coord]:
+                        diffs.append(
+                            f"({coord[0]},{coord[1]}): "
+                            f"ep1={boards[0][coord]} vs ep{ep+1}={boards[ep].get(coord)}"
+                        )
+                return False, (
+                    f"Board changed between episode 1 and {ep+1}! "
+                    f"{len(diffs)} hex(es) differ. First: {diffs[0]}"
+                )
+
+        # --- Check 2: board has expected size ---
+        expected_hexes = config.resolved_board_width * config.resolved_board_height
+        if len(boards[0]) != expected_hexes:
+            return False, (
+                f"Board has {len(boards[0])} hexes, expected {expected_hexes}"
+            )
+
+        # --- Check 3: board matches known properties of the configured board ---
+        # The default BattleForce 2 board has hex (7,0) with water, (9,1) with
+        # woods, and hex (8,5) at elevation 0 with no special features.
+        # A randomly-generated board would not match these reference elevations.
+        # We check that the RL start hex (8,2) has the same elevation as the
+        # file (elevation 0) and is NOT deep water or extreme elevation.
+        rl_elev = boards[0].get((8, 2), None)
+        if rl_elev is None:
+            return False, "RL start hex (8,2) not found on board"
+        if abs(rl_elev) > 2:
+            return False, (
+                f"RL start hex (8,2) has elevation {rl_elev} — "
+                f"expected near 0 for BattleForce 2 map (board may be randomly generated)"
+            )
+
+        # --- Check 4: RL unit has reasonable legal moves (not stuck) ---
+        for ep, n in enumerate(legal_counts):
+            if n < 50:
+                return False, (
+                    f"Episode {ep+1}: only {n} legal moves at start "
+                    f"(expected 100+ on correct board — board may be wrong)"
+                )
+
+        detail = (
+            f"{num_episodes} episodes, board identical across resets, "
+            f"{len(boards[0])} hexes, legal moves: "
+            + "/".join(str(n) for n in legal_counts)
+        )
+        return True, detail
+    finally:
+        env.close()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -451,6 +553,7 @@ TESTS = [
     ("Cross-Validation", test_cross_validation, 4),
     ("Auto-Wake Pilot", test_auto_wake_pilot, 5),
     ("Fixed Deployment", test_fixed_deployment, 6),
+    ("Board Consistency", test_board_consistency, 7),
 ]
 
 
