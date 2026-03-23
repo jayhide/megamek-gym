@@ -285,6 +285,7 @@ poetry run python diagnose_reset.py --megamek-dir ../megamek --test 3
 ## Development Notes
 
 - **V1 scope**: movement phase only, 1v1, single mek per side, BattleForce 2 map
+- **Fire mechanics disabled**: `tacops_start_fire` and `woods_burn_down` are set to false in `RLGameRunner.initializeServer()`. This prevents accidental fire ignition and woods burning down, which add randomness not useful for current training. May re-enable later.
 - **Reward shaping** is done in Python (not Java) so you can iterate without recompiling
 - Parallel training uses per-environment port offsets: `port = rl_port + env_index`
 - The opponent is MegaMek's built-in Princess AI
