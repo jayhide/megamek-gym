@@ -12,18 +12,20 @@ paranoid_autosave: false
 save_budget_mb: 1000
 rl_starting_pos: 2
 opponent_starting_pos: 6
+rl_fixed_coords: [8, 1]
+opponent_fixed_coords: [8, 15]
 rl_deployment: false
 firing_strategy: naive
 step_timeout_seconds: 30
 max_game_rounds: 40
 
 # Training
-exp_name: sanity-check
-num_envs: 8
+exp_name: sanity-check-v2
+num_envs: 20
 stagger_delay: 3.0
 total_timesteps: 500000
-num_steps: 256
-hidden_size: 128
-ent_coef: 0.05
-learning_rate: 0.0003
+num_steps: 128
+hidden_size: 256
+ent_coef: 0.01
+learning_rate: 0.001
 save_interval: 25

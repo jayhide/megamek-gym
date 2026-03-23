@@ -13,6 +13,8 @@ paranoid_autosave: false
 save_budget_mb: 1000
 rl_starting_pos: 2
 opponent_starting_pos: 6
+rl_fixed_coords: [8, 1]
+opponent_fixed_coords: [8, 15]
 rl_deployment: false
 firing_strategy: princess
 step_timeout_seconds: 30
