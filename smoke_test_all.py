@@ -541,6 +541,58 @@ def test_board_consistency(megamek_dir, port, verbose):
         env.close()
 
 
+def test_pilot_stats(megamek_dir, port, verbose):
+    """Pilot stats: both units in mirror matchup have identical gunnery/piloting."""
+    config = MegaMekConfig(
+        megamek_dir=megamek_dir,
+        rl_port=port,
+        max_game_rounds=3,
+        firing_strategy="naive",
+        max_rotating_round_saves=0,
+    )
+
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+    try:
+        obs, info = env.reset()
+        raw_obs = env.unwrapped._last_raw_obs
+        units = raw_obs.get("units", [])
+
+        if len(units) != 2:
+            return False, f"Expected 2 units, got {len(units)}"
+
+        for i, unit in enumerate(units):
+            if "gunnery" not in unit or "piloting" not in unit:
+                return False, (
+                    f"Unit {i} ({unit.get('chassis', '?')} {unit.get('model', '?')}) "
+                    f"missing gunnery/piloting fields (keys: {list(unit.keys())})"
+                )
+
+        u0, u1 = units[0], units[1]
+        g0, g1 = u0["gunnery"], u1["gunnery"]
+        p0, p1 = u0["piloting"], u1["piloting"]
+
+        if verbose:
+            print(f"    Unit 0: {u0['chassis']} {u0['model']} — gunnery={g0}, piloting={p0}")
+            print(f"    Unit 1: {u1['chassis']} {u1['model']} — gunnery={g1}, piloting={p1}")
+
+        if g0 != g1:
+            return False, f"Gunnery mismatch: unit 0 has {g0}, unit 1 has {g1}"
+        if p0 != p1:
+            return False, f"Piloting mismatch: unit 0 has {p0}, unit 1 has {p1}"
+
+        # Play out the episode so the JVM exits cleanly
+        step = 0
+        while True:
+            obs, reward, terminated, truncated, info = env.step(0)
+            step += 1
+            if terminated or truncated or step >= 500:
+                break
+
+        return True, f"Both units: gunnery={g0}, piloting={p0}"
+    finally:
+        env.close()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -554,6 +606,7 @@ TESTS = [
     ("Auto-Wake Pilot", test_auto_wake_pilot, 5),
     ("Fixed Deployment", test_fixed_deployment, 6),
     ("Board Consistency", test_board_consistency, 7),
+    ("Pilot Stats", test_pilot_stats, 8),
 ]
 
 
