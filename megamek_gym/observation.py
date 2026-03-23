@@ -11,7 +11,7 @@ BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
 UNIT_FEATURES = 55
 GLOBAL_FEATURES = 1  # rl_moves_first
-MOVE_FEATURES = 10  # dest_x, dest_y, facing, mp_used, prone, dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff
+MOVE_FEATURES = 11  # dest_x, dest_y, facing, mp_used, prone, dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff, has_los
 OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES  # 383 (without move features)
 
 
@@ -165,6 +165,9 @@ def _flatten_move_features(
             # Elevation advantage
             dest_elev = elev_map.get((dest_x, dest_y), 0)
             buf[base + 9] = (dest_elev - enemy_elev) / 10.0
+
+            # LOS from destination to enemy (precomputed on Java side)
+            buf[base + 10] = float(m.get("has_los", False))
 
 
 def _encode_unit(
