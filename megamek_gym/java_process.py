@@ -67,6 +67,8 @@ class JavaProcess:
         mem_log: int = 0,
         auto_wake_pilot: bool = True,
         force_unconscious_on_turn: int = 0,
+        rl_fixed_coords: tuple[int, int] | None = None,
+        opponent_fixed_coords: tuple[int, int] | None = None,
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -87,6 +89,8 @@ class JavaProcess:
         self.mem_log = mem_log
         self.auto_wake_pilot = auto_wake_pilot
         self.force_unconscious_on_turn = force_unconscious_on_turn
+        self.rl_fixed_coords = rl_fixed_coords
+        self.opponent_fixed_coords = opponent_fixed_coords
         self._process: subprocess.Popen | None = None
         self._stderr_file = None
 
@@ -174,6 +178,10 @@ class JavaProcess:
             str(self.mem_log),
             str(self.auto_wake_pilot).lower(),
             str(self.force_unconscious_on_turn),
+            str(self.rl_fixed_coords[0] if self.rl_fixed_coords else -1),
+            str(self.rl_fixed_coords[1] if self.rl_fixed_coords else -1),
+            str(self.opponent_fixed_coords[0] if self.opponent_fixed_coords else -1),
+            str(self.opponent_fixed_coords[1] if self.opponent_fixed_coords else -1),
         ]
         cmd = [
             "java",

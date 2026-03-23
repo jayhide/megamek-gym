@@ -62,7 +62,7 @@ The Java side lives at:
 
 **Gradle task** in `megamek/build.gradle` (~line 596):
 ```
-./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog|autoWakePilot|forceUnconsciousOnTurn"
+./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog|autoWakePilot|forceUnconsciousOnTurn|rlFixedX|rlFixedY|oppFixedX|oppFixedY"
 ```
 Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
@@ -138,6 +138,8 @@ env = gymnasium.make("MegaMekGym/MegaMek-v0", rl_unit="Locust LCT-1V")
 Board dimensions are auto-derived from the board name (e.g., `"16x17"` in `"Map Set 6/16x17 BattleForce 2"`). For boards without parseable dimensions, set `board_width` and `board_height` explicitly.
 
 The `smoke_test.py` accepts `--config path/to/config.yaml` with optional `--megamek-dir` and `--port` overrides.
+
+**Fixed deployment coordinates**: Set `rl_fixed_coords: [x, y]` and/or `opponent_fixed_coords: [x, y]` in YAML config (or as tuples in Python) to pin a unit to an exact hex every game. Uses MegaMek's `Board.START_ANY` zone with a 1-hex rectangle. When not set (default `null`), the heuristic picks a hex within the configured zone as before.
 
 ## Training
 

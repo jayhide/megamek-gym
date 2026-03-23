@@ -366,6 +366,72 @@ def test_auto_wake_pilot(megamek_dir, port, verbose):
         env.close()
 
 
+def test_fixed_deployment(megamek_dir, port, verbose):
+    """Fixed deployment: units deploy at exact coords, consistent across episodes."""
+    config = MegaMekConfig(
+        megamek_dir=megamek_dir,
+        rl_port=port,
+        max_game_rounds=3,
+        firing_strategy="naive",
+        max_rotating_round_saves=0,
+        rl_fixed_coords=(8, 2),
+        opponent_fixed_coords=(8, 14),
+    )
+
+    board_w = config.resolved_board_width
+    board_h = config.resolved_board_height
+    board_size = board_w * board_h
+
+    num_episodes = 2
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+    try:
+        initial_obs_list = []
+        for ep in range(num_episodes):
+            obs, info = env.reset()
+            initial_obs_list.append(obs.copy())
+            n_legal = info.get("n_legal_moves", 0)
+            if verbose:
+                print(f"    Episode {ep+1}: reset ok, n_legal_moves={n_legal}")
+
+            # Play out the episode (stand still)
+            steps = 0
+            while True:
+                obs, reward, terminated, truncated, info = env.step(0)
+                steps += 1
+                if terminated or truncated:
+                    break
+                if steps >= 500:
+                    return False, f"Episode {ep+1} did not end after 500 steps"
+
+            if verbose:
+                print(f"    Episode {ep+1}: {steps} steps, "
+                      f"terminated={terminated}, truncated={truncated}")
+
+        # Verify RL unit position from the observation. The 55 RL unit features
+        # start at index board_size. Position features (first 2: x/W, y/H)
+        # should match the fixed coords in both episodes.
+        rl_state_start = board_size
+        for ep in range(num_episodes):
+            rl_x_norm = initial_obs_list[ep][rl_state_start]
+            rl_y_norm = initial_obs_list[ep][rl_state_start + 1]
+            actual_x = round(rl_x_norm * board_w)
+            actual_y = round(rl_y_norm * board_h)
+            if verbose:
+                print(f"    Episode {ep+1}: RL unit at ({actual_x}, {actual_y}) "
+                      f"(expected (8, 2))")
+            if (actual_x, actual_y) != (8, 2):
+                return False, (
+                    f"Episode {ep+1}: RL unit at ({actual_x}, {actual_y}), "
+                    f"expected (8, 2)"
+                )
+
+        return True, (
+            f"{num_episodes} episodes, RL unit deployed at (8, 2) in both"
+        )
+    finally:
+        env.close()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -377,6 +443,7 @@ TESTS = [
     ("Persistent Reset", test_persistent_reset, 3),
     ("Cross-Validation", test_cross_validation, 4),
     ("Auto-Wake Pilot", test_auto_wake_pilot, 5),
+    ("Fixed Deployment", test_fixed_deployment, 6),
 ]
 
 

@@ -98,3 +98,41 @@ class TestMegaMekConfig:
         loaded = MegaMekConfig.load(path)
         assert loaded.opponent_type == "rl"
         Path(path).unlink()
+
+    def test_fixed_coords_default_none(self):
+        cfg = MegaMekConfig()
+        assert cfg.rl_fixed_coords is None
+        assert cfg.opponent_fixed_coords is None
+
+    def test_fixed_coords_tuple(self):
+        cfg = MegaMekConfig(rl_fixed_coords=(8, 2), opponent_fixed_coords=(8, 14))
+        assert cfg.rl_fixed_coords == (8, 2)
+        assert cfg.opponent_fixed_coords == (8, 14)
+
+    def test_fixed_coords_list_converted_to_tuple(self):
+        """YAML deserializes [8, 2] as a list; __post_init__ converts to tuple."""
+        cfg = MegaMekConfig(rl_fixed_coords=[8, 2], opponent_fixed_coords=[8, 14])
+        assert cfg.rl_fixed_coords == (8, 2)
+        assert isinstance(cfg.rl_fixed_coords, tuple)
+        assert cfg.opponent_fixed_coords == (8, 14)
+        assert isinstance(cfg.opponent_fixed_coords, tuple)
+
+    def test_fixed_coords_yaml_roundtrip(self):
+        cfg = MegaMekConfig(rl_fixed_coords=(8, 2), opponent_fixed_coords=(8, 14))
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            path = f.name
+        cfg.save(path)
+        loaded = MegaMekConfig.load(path)
+        assert loaded.rl_fixed_coords == (8, 2)
+        assert loaded.opponent_fixed_coords == (8, 14)
+        Path(path).unlink()
+
+    def test_fixed_coords_none_omitted_from_yaml(self):
+        cfg = MegaMekConfig()
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            path = f.name
+        cfg.save(path)
+        content = Path(path).read_text()
+        assert "rl_fixed_coords" not in content
+        assert "opponent_fixed_coords" not in content
+        Path(path).unlink()

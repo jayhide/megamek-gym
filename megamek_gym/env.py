@@ -197,6 +197,8 @@ class MegaMekEnv(gymnasium.Env):
             mem_log=cfg.mem_log,
             auto_wake_pilot=cfg.auto_wake_pilot,
             force_unconscious_on_turn=cfg.force_unconscious_on_turn,
+            rl_fixed_coords=cfg.rl_fixed_coords,
+            opponent_fixed_coords=cfg.opponent_fixed_coords,
         )
         self._java.start()
 

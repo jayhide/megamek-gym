@@ -48,6 +48,8 @@ class MegaMekConfig:
     mem_log: int = 0
     auto_wake_pilot: bool = True
     force_unconscious_on_turn: int = 0
+    rl_fixed_coords: tuple[int, int] | None = None
+    opponent_fixed_coords: tuple[int, int] | None = None
 
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"
@@ -73,6 +75,11 @@ class MegaMekConfig:
     save_interval: int = 50
 
     def __post_init__(self):
+        # YAML deserializes [x, y] as list; convert to tuple
+        if isinstance(self.rl_fixed_coords, list):
+            self.rl_fixed_coords = tuple(self.rl_fixed_coords)
+        if isinstance(self.opponent_fixed_coords, list):
+            self.opponent_fixed_coords = tuple(self.opponent_fixed_coords)
         # Validate that board dimensions can be resolved
         _ = self.resolved_board_width
         _ = self.resolved_board_height
