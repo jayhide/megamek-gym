@@ -109,6 +109,9 @@ tb_summary.py            # TensorBoard run analyzer (text summaries, diagnostics
 eval.py                  # Evaluation script for trained checkpoints
 clean_saves.py           # Delete training artifacts (saves, run dirs, logs, heap dumps)
 analyze_full_moves.py    # Compare current (longest-only) vs full (Pareto frontier) legal moves
+analyze_move_distributions.py  # Multi-game legal move distribution analysis with matplotlib charts
+visualize_hex_map.py     # Interactive hex map viewer: board terrain, reachable hexes, unit positions
+game_viewer.py           # Combined hex map + transcript viewer (side-by-side HTML)
 ```
 
 ## Configuration
@@ -257,9 +260,15 @@ When a Mech falls, the pilot must pass a consciousness check. On failure, `crew.
 
 `_reset_persistent()` sends `{"type": "reset"}` over the socket, but if the game is still in progress (not terminated/truncated), Java is waiting for an action, not a reset. Java's `ActionTranslator` can't parse the reset message (no `move_index` field), falls back to stand-still, and the game continues. Python reads the next observation thinking it's a new game. **This only affects scripts that call `env.reset()` before the game ends.** Training is unaffected because `AsyncVectorEnv` only resets after terminated/truncated.
 
-### Move deduplication (known, unfixed)
+### Move enumeration: walk/run dedup and safety filters
 
-`enumerateLegalMoves()` produces duplicate stand-still paths: the explicit stand-still (always added), plus the starting-position entry from both the forward and backward `LongestPathFinder`. When the entity is mobile, most duplicates are walk/run variants to the same (hex, facing) with different MP costs (~25-30% of moves are duplicates). These waste slots in the 400-move cap and add redundant actions. Deduplication by (hex, facing, move_category) is planned but not yet implemented.
+`enumerateLegalMoves()` in `RLBotClient.java` uses `getAllComputedPathsUnordered()` from `LongestPathFinder` and deduplicates to at most **two paths per (hex, facing)**: a walk-speed path (mpUsed ≤ walkMP) and a run-speed path (mpUsed > walkMP). Within each category, the path that moved through the **most hexes** is kept (maximizes TMM defensive modifier), with ties broken by lowest fall risk (highest PSR success probability). Run paths are only included if they provide more hexes moved than the walk path to the same destination.
+
+Additionally, paths are filtered out if they would:
+- **Collapse a building** (unit weight + 10-ton margin exceeds building CF) — ported from Princess `PathRanker.willBuildingCollapse()`
+- **Exceed fall tolerance** (cumulative PSR success probability < 0.3, i.e. >70% chance of falling) — ported from Princess `PathRanker.getMovePathSuccessProbability()` using `SharedUtility.getPSRList()`
+
+The walk vs run distinction matters strategically: walking has no attack penalty but lower defensive modifier; running gives +1 TMM but +1 to-hit penalty on own attacks. The `mp_used/20` per-move feature already captures this distinction, so no Python-side observation changes were needed.
 
 ### diagnose_reset.py
 
@@ -311,6 +320,23 @@ poetry run python mem_benchmark.py --megamek-dir ../megamek --env-counts 1,2 --e
 For each env count, starts N environments, runs a few episodes to stabilize memory, then measures per-JVM RSS (actual resident memory from `/proc`), JVM heap usage (from `[rl-mem]` log lines), and Python process RSS. Reports a summary table.
 
 The `mem_log` config field (default 0) controls Java-side memory logging verbosity: 0=off, 1=basic heap+delta, 2=pool breakdown, 3=class histogram. The benchmark enables level 1 automatically.
+
+## Move Distribution Analysis
+
+Use `analyze_move_distributions.py` to measure legal move set sizes, reachable hex coverage, walk/run overlap, and facing coverage across multiple games:
+
+```bash
+# Default: 10 games, saves move_distributions.png
+poetry run python analyze_move_distributions.py --megamek-dir ../megamek
+
+# More games for robust statistics
+poetry run python analyze_move_distributions.py --megamek-dir ../megamek --games 20 --output moves.png
+
+# Different unit (adjust --walk-mp to match unit's walk MP)
+poetry run python analyze_move_distributions.py --megamek-dir ../megamek --walk-mp 8 --config configs/locust.yaml
+```
+
+Generates an 8-panel PNG visualization (move count histograms, box plots by round, reachable hex % over time, hex category stacked bars, facing coverage scatter, walk vs run scatter, summary stats) plus detailed text statistics to stdout. Separates mobile steps (>10 moves) from immobile steps (prone/fallen) for cleaner analysis.
 
 ## Debugging Java Errors
 
