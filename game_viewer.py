@@ -94,7 +94,9 @@ def play_game(env, agent, device, deterministic, max_steps):
             rl_owner_id = u.get("owner", -1)
             break
 
-    # Initial snapshot
+    # Capture step-0 snapshot: RL's first decision point (after Princess
+    # moved if she won initiative).  The true pre-movement starting state
+    # is built later from the Round-1 save file.
     if raw_obs.get("legal_moves"):
         snapshots.append(StepSnapshot(
             step_idx=0,
@@ -104,6 +106,7 @@ def play_game(env, agent, device, deterministic, max_steps):
             units=copy.deepcopy(raw_obs.get("units", [])),
             legal_moves=copy.deepcopy(raw_obs.get("legal_moves", [])),
             n_legal=n_legal,
+            action_taken=-1,
             rl_owner_id=rl_owner_id,
         ))
 
@@ -284,13 +287,14 @@ const roundData = {round_data_json};
 const showVerbose = {verbose_js};
 const gameOutcome = {json.dumps(outcome)};
 
-// Build round lookup: round_num -> roundData entries
+// Build round lookup: display_round -> roundData entries
 const roundLookup = {{}};
 for (const rd of roundData) {{
-  const key = rd.round;
+  const key = rd.display_round;
   if (!roundLookup[key]) roundLookup[key] = [];
   roundLookup[key].push(rd);
 }}
+const allDisplayRounds = [...new Set(roundData.map(r => r.display_round))].sort((a,b) => a - b);
 
 let idx = 0;
 
@@ -306,32 +310,101 @@ function armorClass(pct) {{
   return pct <= 25 ? 'armor-low' : (pct <= 50 ? 'armor-mid' : 'armor-good');
 }}
 
-function renderRound(rd, currentStepIdx) {{
+function renderMovementEntries(entries) {{
   let h = '';
-  const label = rd.is_final ? `Final attacks (Round ${{rd.round}})` : `Round ${{rd.round}}`;
+  for (const m of entries) {{
+    let line = escHtml(m.name) + ': ';
+    if (m.prone_change === 'fell') line += '<span class="prone-tag">FELL PRONE</span> ';
+    else if (m.prone_change === 'stood') line += '<span class="armor-good">stood up</span> ';
+    if (m.from_pos && m.to_pos) {{
+      line += `(${{m.from_pos[0]}},${{m.from_pos[1]}}) &rarr; (${{m.to_pos[0]}},${{m.to_pos[1]}}), `;
+    }}
+    line += `facing ${{m.facing}}, ${{m.move_type}}`;
+    h += `<div>${{line}}</div>`;
+  }}
+  return h;
+}}
+
+function renderRLSteps(rd) {{
+  if (!rd.rl_steps || rd.rl_steps.length === 0) return '';
+  let h = '<div class="section-label">RL Agent</div><div class="rl-section">';
+  for (const s of rd.rl_steps) {{
+    const rCls = rewardClass(s.reward);
+    let line = `${{s.phase}}: action ${{s.action}}/${{s.n_legal_moves}} legal`;
+    line += ` &rarr; reward <span class="${{rCls}}">${{s.reward >= 0 ? '+' : ''}}${{s.reward.toFixed(3)}}</span>`;
+    h += `<div class="rl-step">${{line}}</div>`;
+    if (s.components && s.components.length > 0) {{
+      const parts = s.components.map(c => `${{c.name}}=${{c.value >= 0 ? '+' : ''}}${{c.value.toFixed(3)}}`);
+      h += `<div class="components">(${{parts.join(', ')}})</div>`;
+    }}
+  }}
+  const last = rd.rl_steps[rd.rl_steps.length - 1];
+  const cumCls = rewardClass(last.cumulative);
+  h += `<div>Cumulative: <span class="${{cumCls}}">${{last.cumulative >= 0 ? '+' : ''}}${{last.cumulative.toFixed(3)}}</span></div>`;
+  h += '</div>';
+  return h;
+}}
+
+// cutoff: "all" = show everything, "initiative" = header+initiative only,
+// "after_first_move" = header+initiative+first mover movement
+function renderRound(rd, cutoff) {{
+  let h = '';
+  const isStarting = !!rd.is_starting;
+  const dr = rd.display_round;
+  const label = rd.is_final ? `Final (Round ${{dr}})` : (isStarting ? 'Starting State' : `Round ${{dr}}`);
   h += `<div class="round-header">${{label}}</div>`;
+
+  if (isStarting) {{
+    // Starting state: show unit status only
+    if (rd.unit_status && rd.unit_status.length > 0) {{
+      h += `<div class="section-label">Unit status</div>`;
+      for (const u of rd.unit_status) {{
+        let line = `<span class="unit-name">${{escHtml(u.name)}}</span>: `;
+        line += `armor ${{u.armor_current}}/${{u.armor_max}} (<span class="${{armorClass(u.pct)}}">${{u.pct}}%</span>)`;
+        h += `<div class="unit-status">${{line}}</div>`;
+      }}
+    }}
+    return h;
+  }}
+
+  const firstMover = rd.initiative ? rd.initiative.first_mover : null;
+  const secondMover = rd.initiative ? Object.keys(rd.initiative.rolls).find(n => n !== firstMover) : null;
+  const rlMovesFirst = firstMover === 'RLBot';
 
   // Initiative
   if (rd.initiative) {{
     const rolls = Object.entries(rd.initiative.rolls).map(([n,r]) => `${{n}}=${{r}}`).join(', ');
-    const first = rd.initiative.first_mover ? `${{rd.initiative.first_mover}} moves first` : '';
+    const first = firstMover ? `${{firstMover}} moves first` : '';
     h += `<div class="initiative">${{first}} (rolled ${{rolls}})</div>`;
   }}
 
-  // Movement
-  if (rd.movement && rd.movement.length > 0) {{
-    h += `<div class="section-label">Movement</div>`;
-    for (const m of rd.movement) {{
-      let line = escHtml(m.name) + ': ';
-      if (m.prone_change === 'fell') line += '<span class="prone-tag">FELL PRONE</span> ';
-      else if (m.prone_change === 'stood') line += '<span class="armor-good">stood up</span> ';
-      if (m.from_pos && m.to_pos) {{
-        line += `(${{m.from_pos[0]}},${{m.from_pos[1]}}) &rarr; (${{m.to_pos[0]}},${{m.to_pos[1]}}), `;
-      }}
-      line += `facing ${{m.facing}}, ${{m.move_type}}`;
-      h += `<div>${{line}}</div>`;
-    }}
+  if (cutoff === 'initiative') return h;
+
+  // First mover movement
+  const fm = rd.first_movement || [];
+  if (fm.length > 0) {{
+    const moverLabel = firstMover || '?';
+    h += `<div class="section-label">Movement (${{escHtml(moverLabel)}} &mdash; moves first)</div>`;
+    h += renderMovementEntries(fm);
   }}
+
+  if (cutoff === 'after_first_move') return h;
+
+  // cutoff === 'all' from here
+
+  // RL steps after first mover (if RL moved first)
+  if (rlMovesFirst) h += renderRLSteps(rd);
+
+  // Second mover movement
+  const sm = rd.second_movement || [];
+  if (sm.length > 0) {{
+    const moverLabel = secondMover || '?';
+    h += `<div class="section-label">Movement (${{escHtml(moverLabel)}})</div>`;
+    h += renderMovementEntries(sm);
+  }}
+
+  // RL steps after second mover (if RL moved second)
+  if (!rlMovesFirst) h += renderRLSteps(rd);
 
   // Combat
   if (rd.combat && rd.combat.length > 0) {{
@@ -376,28 +449,6 @@ function renderRound(rd, currentStepIdx) {{
     }}
   }}
 
-  // RL steps
-  if (rd.rl_steps && rd.rl_steps.length > 0) {{
-    h += `<div class="section-label">RL Agent</div><div class="rl-section">`;
-    for (let si = 0; si < rd.rl_steps.length; si++) {{
-      const s = rd.rl_steps[si];
-      const cls = 'rl-step';
-      const rCls = rewardClass(s.reward);
-      let line = `${{s.phase}}: action ${{s.action}}/${{s.n_legal_moves}} legal`;
-      line += ` &rarr; reward <span class="${{rCls}}">${{s.reward >= 0 ? '+' : ''}}${{s.reward.toFixed(3)}}</span>`;
-      h += `<div class="${{cls}}">${{line}}</div>`;
-      if (s.components && s.components.length > 0) {{
-        const parts = s.components.map(c => `${{c.name}}=${{c.value >= 0 ? '+' : ''}}${{c.value.toFixed(3)}}`);
-        h += `<div class="components">(${{parts.join(', ')}})</div>`;
-      }}
-    }}
-    // Cumulative from last step
-    const last = rd.rl_steps[rd.rl_steps.length - 1];
-    const cumCls = rewardClass(last.cumulative);
-    h += `<div>Cumulative: <span class="${{cumCls}}">${{last.cumulative >= 0 ? '+' : ''}}${{last.cumulative.toFixed(3)}}</span></div>`;
-    h += `</div>`;
-  }}
-
   return h;
 }}
 
@@ -411,30 +462,45 @@ function show(i) {{
   const meta = stepMeta[idx] || {{}};
   const roundNum = meta.round || 0;
   const phase = meta.phase || '';
+  const isLast = (idx === frames.length - 1);
+  const roundLabel = phase === 'STARTING' ? 'Starting State' : `Round ${{roundNum}}`;
   document.getElementById("step-label").textContent =
-    `Step ${{idx+1}} / ${{frames.length}}  (Round ${{roundNum}}${{phase ? ', ' + phase : ''}})`;
+    `Step ${{idx+1}} / ${{frames.length}}  (${{roundLabel}}${{phase && phase !== 'STARTING' ? ', ' + phase : ''}})`;
 
-  // Render transcript for this round (and previous rounds for context)
+  // Progressive transcript reveal synced with hex map snapshots.
+  // Each snapshot shows the board at the RL bot's decision point.
+  // For past rounds (< roundNum): show everything.
+  // For the current round (== roundNum): show only what has happened
+  //   before the RL bot moves (initiative + opponent movement if opponent first).
+  // On the last frame: show everything (game is over).
   let html = '';
-  const allRounds = [...new Set(roundData.map(r => r.round))].sort((a,b) => a - b);
-  for (const rn of allRounds) {{
+  for (const rn of allDisplayRounds) {{
     const entries = roundLookup[rn] || [];
     for (const rd of entries) {{
-      html += renderRound(rd, idx);
+      if (rn < roundNum) {{
+        html += renderRound(rd, 'all');
+      }} else if (rn === roundNum) {{
+        if (isLast) {{
+          // Last frame: show complete round (game over)
+          html += renderRound(rd, 'all');
+        }} else {{
+          const rlFirst = rd.initiative && rd.initiative.first_mover === 'RLBot';
+          html += renderRound(rd, rlFirst ? 'initiative' : 'after_first_move');
+        }}
+      }}
+      // rn > roundNum: skip
     }}
-    if (rn >= roundNum && !entries.some(e => e.is_final)) break;
+    if (rn >= roundNum) break;
   }}
 
   const tp = document.getElementById("transcript-panel");
   tp.innerHTML = html;
 
-  // Auto-scroll to current round header
+  // Auto-scroll to the last round header (most recent events)
   const headers = tp.querySelectorAll('.round-header');
-  for (const h of headers) {{
-    if (h.textContent.includes('Round ' + roundNum)) {{
-      h.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
-      break;
-    }}
+  if (headers.length > 0) {{
+    const lastHeader = headers[headers.length - 1];
+    lastHeader.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
   }}
 
   // Outcome bar
@@ -539,6 +605,50 @@ def main():
 
     round_data = build_round_transcript(saves, step_log, autosave_path)
 
+    # Build starting-state snapshot from the first save with deployed units.
+    # The first obs from reset() is already after Princess moved (if she won
+    # initiative), so we reconstruct the true pre-move board from save data.
+    starting_save = None
+    for s in saves:
+        if any(u.get("pos") is not None for u in s.get("units", [])):
+            starting_save = s
+            break
+
+    if starting_save and snapshots:
+        # Convert save units to raw-obs format expected by draw_units
+        starting_units = []
+        for u in starting_save["units"]:
+            pos = u.get("pos")
+            if pos is None:
+                continue
+            starting_units.append({
+                "x": pos[0], "y": pos[1],
+                "facing": u.get("facing", 0),
+                "owner": u.get("owner_id", -1),
+                "chassis": u["name"].split("(")[0].strip().split()[-1],
+                "destroyed": u.get("destroyed", False),
+            })
+
+        # Detect rl_owner_id: the owner that matches "RLBot" in name
+        starting_rl_owner = -1
+        for u in starting_save["units"]:
+            if "RLBot" in u.get("name", ""):
+                starting_rl_owner = u.get("owner_id", -1)
+                break
+
+        # Use board from first real snapshot (save files don't include board hex data)
+        starting_snap = StepSnapshot(
+            step_idx=-1,
+            game_round=0,
+            phase="STARTING",
+            board=copy.deepcopy(snapshots[0].board),
+            units=starting_units,
+            legal_moves=[],
+            n_legal=0,
+            rl_owner_id=starting_rl_owner,
+        )
+        snapshots.insert(0, starting_snap)
+
     # Build step metadata for JS
     step_meta = []
     for snap in snapshots:
@@ -547,8 +657,13 @@ def main():
             "phase": snap.phase,
         })
 
-    # Auto-detect walk MP
-    walk_mp = detect_walk_mp(snapshots[0].units, snapshots[0].rl_owner_id)
+    # Auto-detect walk MP from a snapshot with full unit data (not the
+    # synthetic starting snapshot whose units lack mp_walk)
+    walk_mp = 4
+    for snap in snapshots:
+        if any("mp_walk" in u for u in snap.units):
+            walk_mp = detect_walk_mp(snap.units, snap.rl_owner_id)
+            break
     print(f"Walk MP: {walk_mp}")
 
     # Render hex map SVGs

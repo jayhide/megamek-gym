@@ -581,7 +581,7 @@ def extract_initiative(text: str) -> dict | None:
             continue
         pid = int(id_m.group(1))
         name = name_m.group(1)
-        if name == "watcher" or pid == 0:
+        if name == "watcher":
             continue
 
         # Get the last roll value (current round)
@@ -787,6 +787,7 @@ def diff_units_structured(prev_units: list[dict], curr_units: list[dict]) -> lis
                 "facing": facing_str,
                 "move_type": move_type,
                 "prone_change": prone_change,
+                "owner_id": curr.get("owner_id", -1),
             })
 
     return results
@@ -837,98 +838,193 @@ def armor_summary_structured(unit: dict) -> dict:
     }
 
 
+def _build_rl_steps(round_steps: list[dict]) -> list[dict]:
+    """Convert raw step_log entries into structured RL step dicts."""
+    result = []
+    for s in round_steps:
+        step_data = {
+            "phase": "GAME_END" if s.get("phase") == "VICTORY" else s.get("phase", ""),
+            "action": s.get("action"),
+            "n_legal_moves": s.get("n_legal_moves", 0),
+            "reward": round(s.get("reward", 0), 4),
+            "cumulative": round(s.get("cumulative_return", 0), 4),
+        }
+        details = s.get("reward_details", [])
+        nonzero = [(name, round(weighted, 4))
+                   for name, raw, weighted in details if abs(weighted) > 1e-6]
+        if nonzero:
+            step_data["components"] = [
+                {"name": name.replace("Reward", "").replace("DamageDelta", "Damage")
+                 .replace("LocationDestruction", "LocDestroy")
+                 .replace("RangeAdvantage", "Range"),
+                 "value": val}
+                for name, val in nonzero
+            ]
+        result.append(step_data)
+    return result
+
+
+def _split_movement(all_movement: list[dict], first_mover_id) -> tuple[list[dict], list[dict]]:
+    """Split movement entries into first/second mover lists, stripping owner_id."""
+    first = [
+        {k: v for k, v in m.items() if k != "owner_id"}
+        for m in all_movement if m.get("owner_id") == first_mover_id
+    ]
+    second = [
+        {k: v for k, v in m.items() if k != "owner_id"}
+        for m in all_movement if m.get("owner_id") != first_mover_id
+    ]
+    return first, second
+
+
 def build_round_transcript(saves: list[dict], step_log: list[dict],
                            autosave_path=None) -> list[dict]:
     """Build JSON-serializable transcript data from parsed saves and step_log.
+
+    Each entry represents one coherent game round: initiative from save G
+    determines the movement order, movement/combat come from diffing save G
+    vs save G+1, and unit status reflects the post-round state from save G+1.
 
     Args:
         saves: List of parsed save dicts (from parse_save()).
         step_log: List of per-step dicts with round, phase, action, reward, etc.
         autosave_path: Optional path to autosave file for final round combat data.
 
-    Returns list of round dicts, each with keys: round, initiative, movement,
-    combat, damage, unit_status, rl_steps.
+    Returns list of round dicts with keys: display_round, initiative,
+    first_movement, second_movement, combat, damage, unit_status, rl_steps.
     """
-    # Group step_log by round
+    # Group step_log by round (step_log tags each entry with the RESULTING
+    # observation's round, so an action in game round G has step_log round G+1)
     steps_by_round: dict[int, list[dict]] = {}
     for s in step_log:
         steps_by_round.setdefault(s["round"], []).append(s)
 
-    rounds = []
+    # Find the first save with deployed units (skip round 0 pre-deployment)
+    first_deployed_idx = 0
     for i, save in enumerate(saves):
-        round_num = save["round"]
-        prev_save = saves[i - 1] if i > 0 else None
+        if any(u.get("pos") is not None for u in save.get("units", [])):
+            first_deployed_idx = i
+            break
 
-        rd: dict = {"round": round_num}
+    rounds = []
 
-        # Initiative
-        init = save.get("initiative")
+    # Starting state entry: deployed units before any movement
+    if first_deployed_idx < len(saves):
+        deployed_save = saves[first_deployed_idx]
+        # Merge initiative from round 0 if deployed save lacks it
+        init = deployed_save.get("initiative")
+        if not init or not init.get("rolls"):
+            for s in saves[:first_deployed_idx]:
+                candidate = s.get("initiative")
+                if candidate and candidate.get("rolls"):
+                    init = candidate
+                    break
+
+        starting_initiative = None
         if init and init.get("rolls"):
-            rd["initiative"] = {
+            starting_initiative = {
                 "rolls": init["rolls"],
                 "first_mover": init.get("first_mover_name"),
+                "first_mover_id": init.get("first_mover_id"),
             }
-        else:
-            rd["initiative"] = None
 
-        # Movement
-        if prev_save:
-            rd["movement"] = diff_units_structured(prev_save["units"], save["units"])
-        else:
-            rd["movement"] = []
+        rounds.append({
+            "display_round": 0,
+            "is_starting": True,
+            "initiative": starting_initiative,
+            "first_movement": [],
+            "second_movement": [],
+            "combat": [],
+            "damage": [],
+            "unit_status": [armor_summary_structured(u) for u in deployed_save["units"]],
+            "rl_steps": [],
+        })
 
-        # Combat
-        round_reports = get_round_reports(prev_save, save)
-        rd["combat"] = decode_combat_reports_structured(round_reports)
-        rd["damage"] = decode_damage_reports_structured(round_reports)
+    # Game round entries: each entry G uses save G → save G+1
+    for i in range(first_deployed_idx, len(saves) - 1):
+        curr_save = saves[i]
+        next_save = saves[i + 1]
+        game_round = curr_save["round"]
 
-        # Unit status
-        rd["unit_status"] = [armor_summary_structured(u) for u in save["units"]]
-
-        # RL steps for this round
-        round_steps = steps_by_round.get(round_num, [])
-        rd["rl_steps"] = []
-        for s in round_steps:
-            step_data = {
-                "phase": "GAME_END" if s.get("phase") == "VICTORY" else s.get("phase", ""),
-                "action": s.get("action"),
-                "n_legal_moves": s.get("n_legal_moves", 0),
-                "reward": round(s.get("reward", 0), 4),
-                "cumulative": round(s.get("cumulative_return", 0), 4),
+        # Initiative for this game round (from curr_save)
+        init = curr_save.get("initiative")
+        initiative = None
+        if init and init.get("rolls"):
+            initiative = {
+                "rolls": init["rolls"],
+                "first_mover": init.get("first_mover_name"),
+                "first_mover_id": init.get("first_mover_id"),
             }
-            details = s.get("reward_details", [])
-            nonzero = [(name, round(weighted, 4))
-                       for name, raw, weighted in details if abs(weighted) > 1e-6]
-            if nonzero:
-                step_data["components"] = [
-                    {"name": name.replace("Reward", "").replace("DamageDelta", "Damage")
-                     .replace("LocationDestruction", "LocDestroy")
-                     .replace("RangeAdvantage", "Range"),
-                     "value": val}
-                    for name, val in nonzero
-                ]
-            rd["rl_steps"].append(step_data)
 
-        rounds.append(rd)
+        # Movement during this round (diff curr → next), split by initiative
+        all_movement = diff_units_structured(curr_save["units"], next_save["units"])
+        first_mover_id = initiative["first_mover_id"] if initiative else None
+        first_movement, second_movement = _split_movement(all_movement, first_mover_id)
 
-    # Handle autosave (final round combat data)
+        # Combat/damage during this round
+        round_reports = get_round_reports(curr_save, next_save)
+        combat = decode_combat_reports_structured(round_reports)
+        damage = decode_damage_reports_structured(round_reports)
+
+        # Unit status after this round (from next save)
+        unit_status = [armor_summary_structured(u) for u in next_save["units"]]
+
+        # RL steps: step_log tags with resulting obs round (game_round + 1)
+        rl_steps = _build_rl_steps(steps_by_round.get(game_round + 1, []))
+
+        rounds.append({
+            "display_round": game_round,
+            "initiative": initiative,
+            "first_movement": first_movement,
+            "second_movement": second_movement,
+            "combat": combat,
+            "damage": damage,
+            "unit_status": unit_status,
+            "rl_steps": rl_steps,
+        })
+
+    # Handle autosave (final round: last save → autosave)
     if autosave_path and saves:
         final_save = parse_save(autosave_path)
-        last_round_save = saves[-1]
-        final_reports = get_round_reports(last_round_save, final_save)
+        last_save = saves[-1]
+        final_reports = get_round_reports(last_save, final_save)
+        game_round = last_save["round"]
 
-        if final_reports:
-            final_rd = {
-                "round": last_round_save["round"],
-                "is_final": True,
-                "initiative": None,
-                "movement": [],
-                "combat": decode_combat_reports_structured(final_reports),
-                "damage": decode_damage_reports_structured(final_reports),
-                "unit_status": [armor_summary_structured(u) for u in final_save["units"]],
-                "rl_steps": [],
+        # Initiative for this round
+        init = last_save.get("initiative")
+        initiative = None
+        if init and init.get("rolls"):
+            initiative = {
+                "rolls": init["rolls"],
+                "first_mover": init.get("first_mover_name"),
+                "first_mover_id": init.get("first_mover_id"),
             }
-            rounds.append(final_rd)
+
+        # Movement during this round
+        all_movement = diff_units_structured(last_save["units"], final_save["units"])
+        first_mover_id = initiative["first_mover_id"] if initiative else None
+        first_movement, second_movement = _split_movement(all_movement, first_mover_id)
+
+        # RL steps for this round
+        rl_steps = _build_rl_steps(steps_by_round.get(game_round + 1, []))
+
+        # Also check for step_log entries tagged with this round itself
+        # (terminal steps may use the current round, not round+1)
+        if not rl_steps:
+            rl_steps = _build_rl_steps(steps_by_round.get(game_round, []))
+
+        final_rd = {
+            "display_round": game_round,
+            "is_final": True,
+            "initiative": initiative,
+            "first_movement": first_movement,
+            "second_movement": second_movement,
+            "combat": decode_combat_reports_structured(final_reports),
+            "damage": decode_damage_reports_structured(final_reports),
+            "unit_status": [armor_summary_structured(u) for u in final_save["units"]],
+            "rl_steps": rl_steps,
+        }
+        rounds.append(final_rd)
 
     return rounds
 
