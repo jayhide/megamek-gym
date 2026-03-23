@@ -46,6 +46,8 @@ class MegaMekConfig:
     opponent_type: str = "princess"
     force_gc: bool = False
     mem_log: int = 0
+    auto_wake_pilot: bool = True
+    force_unconscious_on_turn: int = 0
 
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"

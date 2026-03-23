@@ -195,6 +195,8 @@ class MegaMekEnv(gymnasium.Env):
             opponent_type=cfg.opponent_type,
             force_gc=cfg.force_gc,
             mem_log=cfg.mem_log,
+            auto_wake_pilot=cfg.auto_wake_pilot,
+            force_unconscious_on_turn=cfg.force_unconscious_on_turn,
         )
         self._java.start()
 
@@ -436,6 +438,7 @@ class MegaMekEnv(gymnasium.Env):
             "game_rounds": game_round,
             "java_crash": 0,
             "early_termination": 0,
+            "auto_wake_count": raw_obs.get("auto_wake_count", 0),
         }
         return info
 

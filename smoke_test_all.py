@@ -302,6 +302,70 @@ def test_persistent_reset(megamek_dir, port, verbose):
         env.close()
 
 
+def test_auto_wake_pilot(megamek_dir, port, verbose):
+    """Auto-wake pilot: force unconscious on turn 1, verify auto-wake restores movement."""
+    config = MegaMekConfig(
+        megamek_dir=megamek_dir,
+        rl_port=port,
+        max_game_rounds=50,
+        firing_strategy="naive",
+        max_rotating_round_saves=0,
+        auto_wake_pilot=True,
+        force_unconscious_on_turn=1,
+    )
+
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+    try:
+        obs, info = env.reset()
+        saw_auto_wake = False
+        step = 0
+
+        while True:
+            n_legal = info.get("n_legal_moves", 0)
+            auto_wake_count = info.get("auto_wake_count", 0)
+
+            if auto_wake_count > 0 and not saw_auto_wake:
+                saw_auto_wake = True
+                if verbose:
+                    print(f"    Step {step}: auto-wake fired (count={auto_wake_count}), "
+                          f"n_legal_moves={n_legal}")
+                # After auto-wake, the unit should have full movement (> 1 legal move)
+                if n_legal <= 1:
+                    return False, (
+                        f"Step {step}: auto-wake fired but n_legal_moves={n_legal} "
+                        "(expected > 1 after waking pilot)"
+                    )
+
+            action = np.random.randint(0, max(n_legal, 1))
+            obs, reward, terminated, truncated, info = env.step(action)
+            step += 1
+
+            if verbose and step <= 5:
+                print(
+                    f"    Step {step:3d} r={info.get('round', '?'):>2} "
+                    f"reward={reward:+.3f} moves={info.get('n_legal_moves', 0):>4d} "
+                    f"auto_wake={info.get('auto_wake_count', 0)}"
+                )
+
+            if terminated or truncated:
+                break
+            if step >= 500:
+                return False, "Episode did not end after 500 steps"
+
+        if not saw_auto_wake:
+            return False, (
+                "force_unconscious_on_turn=1 but auto_wake_count never > 0 "
+                "(auto-wake did not fire)"
+            )
+
+        return True, (
+            f"{step} steps, auto-wake verified "
+            f"(pilot forced unconscious on turn 1, woken with full movement)"
+        )
+    finally:
+        env.close()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -312,6 +376,7 @@ TESTS = [
     ("Termination", test_termination, 2),
     ("Persistent Reset", test_persistent_reset, 3),
     ("Cross-Validation", test_cross_validation, 4),
+    ("Auto-Wake Pilot", test_auto_wake_pilot, 5),
 ]
 
 

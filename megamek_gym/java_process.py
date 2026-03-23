@@ -65,6 +65,8 @@ class JavaProcess:
         opponent_type: str = "princess",
         force_gc: bool = False,
         mem_log: int = 0,
+        auto_wake_pilot: bool = True,
+        force_unconscious_on_turn: int = 0,
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -83,6 +85,8 @@ class JavaProcess:
         self.opponent_type = opponent_type
         self.force_gc = force_gc
         self.mem_log = mem_log
+        self.auto_wake_pilot = auto_wake_pilot
+        self.force_unconscious_on_turn = force_unconscious_on_turn
         self._process: subprocess.Popen | None = None
         self._stderr_file = None
 
@@ -168,6 +172,8 @@ class JavaProcess:
             self.opponent_type,
             str(self.force_gc).lower(),
             str(self.mem_log),
+            str(self.auto_wake_pilot).lower(),
+            str(self.force_unconscious_on_turn),
         ]
         cmd = [
             "java",
