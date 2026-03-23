@@ -108,7 +108,6 @@ train_ppo.py             # CleanRL-style PPO training script
 tb_summary.py            # TensorBoard run analyzer (text summaries, diagnostics, comparison)
 eval.py                  # Evaluation script for trained checkpoints
 clean_saves.py           # Delete training artifacts (saves, run dirs, logs, heap dumps)
-analyze_dedup.py         # Analyze move duplication at various key granularities
 analyze_full_moves.py    # Compare current (longest-only) vs full (Pareto frontier) legal moves
 ```
 
@@ -254,7 +253,7 @@ When a Mech falls, the pilot must pass a consciousness check. On failure, `crew.
 
 ### Mid-game reset sends action instead of reset
 
-`_reset_persistent()` sends `{"type": "reset"}` over the socket, but if the game is still in progress (not terminated/truncated), Java is waiting for an action, not a reset. Java's `ActionTranslator` can't parse the reset message (no `move_index` field), falls back to stand-still, and the game continues. Python reads the next observation thinking it's a new game. **This only affects scripts that call `env.reset()` before the game ends** (e.g., `analyze_dedup.py` with `--max-steps`). Training is unaffected because `AsyncVectorEnv` only resets after terminated/truncated.
+`_reset_persistent()` sends `{"type": "reset"}` over the socket, but if the game is still in progress (not terminated/truncated), Java is waiting for an action, not a reset. Java's `ActionTranslator` can't parse the reset message (no `move_index` field), falls back to stand-still, and the game continues. Python reads the next observation thinking it's a new game. **This only affects scripts that call `env.reset()` before the game ends.** Training is unaffected because `AsyncVectorEnv` only resets after terminated/truncated.
 
 ### Move deduplication (known, unfixed)
 
