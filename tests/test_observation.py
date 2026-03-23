@@ -242,20 +242,18 @@ class TestMoveFeatures:
         flat = self._flat_with_moves()
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
 
-        # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1, prone=False
+        # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1
         assert flat[move_offset] == pytest.approx(5 / 16)
         assert flat[move_offset + 1] == pytest.approx(6 / 17)
         assert flat[move_offset + 2] == pytest.approx(2 / 5.0)
         assert flat[move_offset + 3] == pytest.approx(1 / 20.0)
-        assert flat[move_offset + 4] == 0.0  # not prone
 
-        # Move 1: dest_x=6, dest_y=7, facing=3, mp_used=2, prone=False
+        # Move 1: dest_x=6, dest_y=7, facing=3, mp_used=2
         m1 = move_offset + MOVE_FEATURES
         assert flat[m1] == pytest.approx(6 / 16)
         assert flat[m1 + 1] == pytest.approx(7 / 17)
         assert flat[m1 + 2] == pytest.approx(3 / 5.0)
         assert flat[m1 + 3] == pytest.approx(2 / 20.0)
-        assert flat[m1 + 4] == 0.0  # not prone
 
     def test_padding_zeros(self):
         """Unused move slots should be all zeros."""
@@ -280,7 +278,7 @@ class TestMoveFeatures:
         np.testing.assert_array_equal(flat[move_offset:move_end], 0.0)
 
     def test_deployment_move_zeros(self):
-        """Deployment moves (no mp_used/prone) should default to 0."""
+        """Deployment moves (no mp_used) should default to 0."""
         obs = _make_obs()
         obs["legal_moves"] = [
             {"index": 0, "dest_x": 3, "dest_y": 4, "facing": 0},
@@ -295,7 +293,6 @@ class TestMoveFeatures:
         assert flat[move_offset + 1] == pytest.approx(4 / 17)
         assert flat[move_offset + 2] == pytest.approx(0 / 5.0)
         assert flat[move_offset + 3] == 0.0  # mp_used defaults to 0
-        assert flat[move_offset + 4] == 0.0  # prone defaults to 0
 
     def test_unit_features_unchanged(self):
         """Adding move features should not affect board or unit encoding."""
@@ -312,7 +309,7 @@ class TestTacticalMoveFeatures:
     MAX_MOVES = 10
 
     def test_move_feature_count(self):
-        assert MOVE_FEATURES == 11
+        assert MOVE_FEATURES == 10
 
     def test_dist_to_enemy(self):
         """Distance from move destination to enemy position."""
@@ -327,7 +324,7 @@ class TestTacticalMoveFeatures:
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         expected_dist = hex_distance(5, 6, 10, 12)
         max_dim = max(16, 17)
-        assert flat[move_offset + 5] == pytest.approx(expected_dist / max_dim)
+        assert flat[move_offset + 4] == pytest.approx(expected_dist / max_dim)
 
     def test_range_quality_feature(self):
         """RL weapon effectiveness from hypothetical move position."""
@@ -349,7 +346,7 @@ class TestTacticalMoveFeatures:
             target_x=7, target_y=7,
             unit_x=5, unit_y=6, unit_facing=2,
         )
-        assert flat[move_offset + 6] == pytest.approx(expected)
+        assert flat[move_offset + 5] == pytest.approx(expected)
         assert expected != 0.0  # sanity: should be a real score
 
     def test_enemy_range_quality_feature(self):
@@ -370,7 +367,7 @@ class TestTacticalMoveFeatures:
             target_x=5, target_y=6,
             unit_x=7, unit_y=7, unit_facing=4,
         )
-        assert flat[move_offset + 7] == pytest.approx(expected)
+        assert flat[move_offset + 6] == pytest.approx(expected)
         assert expected != 0.0
 
     def test_terrain_cover_feature(self):
@@ -387,10 +384,10 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         # Move 0 dest (5,6) is Light Woods → cover_value=1.0, normalized /2.0 = 0.5
-        assert flat[move_offset + 8] == pytest.approx(0.5)
+        assert flat[move_offset + 7] == pytest.approx(0.5)
         # Move 1 dest (6,7) has no terrain → 0.0
         m1 = move_offset + MOVE_FEATURES
-        assert flat[m1 + 8] == pytest.approx(0.0)
+        assert flat[m1 + 7] == pytest.approx(0.0)
 
     def test_elevation_diff_feature(self):
         """Elevation difference between move dest and enemy position."""
@@ -406,7 +403,7 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         # Move 0 dest (5,6) elev=3, enemy (10,12) elev=1 → diff=2, /10 = 0.2
-        assert flat[move_offset + 9] == pytest.approx(0.2)
+        assert flat[move_offset + 8] == pytest.approx(0.2)
 
     def test_has_los_feature(self):
         """LOS boolean feature from Java-side precomputed lookup."""
@@ -418,10 +415,10 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         # Move 0 has_los=True → 1.0
-        assert flat[move_offset + 10] == pytest.approx(1.0)
+        assert flat[move_offset + 9] == pytest.approx(1.0)
         # Move 1 has_los=False → 0.0
         m1 = move_offset + MOVE_FEATURES
-        assert flat[m1 + 10] == pytest.approx(0.0)
+        assert flat[m1 + 9] == pytest.approx(0.0)
 
     def test_has_los_defaults_false(self):
         """Missing has_los field defaults to 0.0."""
@@ -436,7 +433,7 @@ class TestTacticalMoveFeatures:
             max_legal_moves=self.MAX_MOVES,
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
-        assert flat[move_offset + 10] == pytest.approx(0.0)
+        assert flat[move_offset + 9] == pytest.approx(0.0)
 
     def test_tactical_features_no_enemy(self):
         """When enemy is missing, tactical features default to 0."""
@@ -449,7 +446,7 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         # All 6 tactical features should be 0.0 (dist, range_quality, enemy_range_quality, cover, elev_diff, has_los)
-        for feat_idx in range(5, 11):
+        for feat_idx in range(4, 10):
             assert flat[move_offset + feat_idx] == 0.0
 
     def test_tactical_features_padding_zeros(self):

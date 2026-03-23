@@ -11,7 +11,12 @@ BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
 UNIT_FEATURES = 55
 GLOBAL_FEATURES = 1  # rl_moves_first
-MOVE_FEATURES = 11  # dest_x, dest_y, facing, mp_used, prone, dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff, has_los
+MOVE_FEATURE_NAMES = [
+    "dest_x", "dest_y", "facing", "mp_used",
+    "dist_to_enemy", "range_quality", "enemy_range_quality",
+    "terrain_cover", "elevation_diff", "has_los",
+]
+MOVE_FEATURES = len(MOVE_FEATURE_NAMES)
 OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES  # 383 (without move features)
 
 
@@ -99,9 +104,9 @@ def _flatten_move_features(
 ) -> None:
     """Write normalized move features into buf[offset:offset + max_legal_moves * MOVE_FEATURES].
 
-    Each move gets 10 floats:
-      Kinematic: dest_x/W, dest_y/H, facing/5, mp_used/20, prone
-      Tactical:  dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff
+    Each move gets MOVE_FEATURES floats:
+      Kinematic: dest_x/W, dest_y/H, facing/5, mp_used/20
+      Tactical:  dist_to_enemy, range_quality, enemy_range_quality, terrain_cover, elevation_diff, has_los
     Unused slots (index >= len(legal_moves)) stay zero.
     """
     # Pre-compute enemy info and elevation lookup
@@ -130,20 +135,19 @@ def _flatten_move_features(
         dest_y = m.get("dest_y", 0)
         facing = m.get("facing", 0)
 
-        # Kinematic features (5)
+        # Kinematic features (4)
         buf[base] = dest_x / board_width
         buf[base + 1] = dest_y / board_height
         buf[base + 2] = facing / 5.0
         buf[base + 3] = m.get("mp_used", 0) / 20.0
-        buf[base + 4] = float(m.get("prone", False))
 
-        # Tactical features (5)
+        # Tactical features (6)
         if has_enemy:
             dist = hex_distance(dest_x, dest_y, ex, ey)
-            buf[base + 5] = dist / max_dim
+            buf[base + 4] = dist / max_dim
 
             # RL weapon effectiveness from this hypothetical position
-            buf[base + 6] = range_quality(
+            buf[base + 5] = range_quality(
                 rl_unit, dist,
                 target_x=ex, target_y=ey,
                 unit_x=dest_x, unit_y=dest_y,
@@ -151,7 +155,7 @@ def _flatten_move_features(
             ) if rl_unit else 0.0
 
             # Enemy weapon effectiveness at this distance
-            buf[base + 7] = range_quality(
+            buf[base + 6] = range_quality(
                 enemy_unit, dist,
                 target_x=dest_x, target_y=dest_y,
                 unit_x=ex, unit_y=ey,
@@ -160,14 +164,14 @@ def _flatten_move_features(
 
             # Terrain cover at destination
             if board_hexes:
-                buf[base + 8] = cover_value(board_hexes, dest_x, dest_y) / 2.0
+                buf[base + 7] = cover_value(board_hexes, dest_x, dest_y) / 2.0
 
             # Elevation advantage
             dest_elev = elev_map.get((dest_x, dest_y), 0)
-            buf[base + 9] = (dest_elev - enemy_elev) / 10.0
+            buf[base + 8] = (dest_elev - enemy_elev) / 10.0
 
             # LOS from destination to enemy (precomputed on Java side)
-            buf[base + 10] = float(m.get("has_los", False))
+            buf[base + 9] = float(m.get("has_los", False))
 
 
 def _encode_unit(

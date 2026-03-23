@@ -30,7 +30,10 @@ import numpy as np
 
 import megamek_gym  # noqa: F401 — registers MegaMekGym/MegaMek-v0
 from megamek_gym.config import MegaMekConfig
-from megamek_gym.observation import compute_obs_size, format_observation
+from megamek_gym.observation import (
+    compute_obs_size, format_observation,
+    MOVE_FEATURES, MOVE_FEATURE_NAMES, UNIT_FEATURES, GLOBAL_FEATURES,
+)
 from tests.test_cross_validation import validate_observation
 
 
@@ -52,6 +55,19 @@ signal.signal(signal.SIGALRM, _alarm_handler)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "configs" / "default.yaml"
+
+
+def base_config(megamek_dir, port, **overrides):
+    """Load default.yaml and apply per-test overrides."""
+    config = MegaMekConfig.load(str(DEFAULT_CONFIG_PATH))
+    config.megamek_dir = megamek_dir
+    config.rl_port = port
+    for k, v in overrides.items():
+        setattr(config, k, v)
+    return config
+
 
 def read_peak_memory(megamek_dir, port):
     """Read peak JVM memory from rl_java_{port}.log [rl-mem] lines."""
@@ -119,14 +135,8 @@ def run_episode(env, max_steps=500, action_fn=None, verbose=False):
 
 def test_basic_episode(megamek_dir, port, verbose):
     """Basic episode: reset, random moves, game ends, obs shape correct."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=50,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        perf_log=True,
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=50, perf_log=True)
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
     try:
@@ -134,7 +144,9 @@ def test_basic_episode(megamek_dir, port, verbose):
             env, verbose=verbose
         )
 
-        expected_size = compute_obs_size(16, 17, config.max_legal_moves)
+        bw = config.resolved_board_width
+        bh = config.resolved_board_height
+        expected_size = compute_obs_size(bw, bh, config.max_legal_moves)
         if obs_shape != (expected_size,):
             return False, f"obs shape {obs_shape} != expected ({expected_size},)"
 
@@ -152,14 +164,8 @@ def test_basic_episode(megamek_dir, port, verbose):
 
 def test_truncation(megamek_dir, port, verbose):
     """Truncation: low round limit -> truncated=True, terminated=False."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=3,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        perf_log=True,
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=3, perf_log=True)
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
     try:
@@ -186,17 +192,11 @@ def test_truncation(megamek_dir, port, verbose):
 
 def test_termination(megamek_dir, port, verbose):
     """Termination: natural game end -> terminated=True, truncated=False."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        rl_unit="Locust LCT-1V",
-        opponent_unit="Commando COM-2D",
-        max_game_rounds=0,
-        java_timeout_minutes=5,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        perf_log=True,
-    )
+    config = base_config(megamek_dir, port,
+                         rl_unit="Locust LCT-1V",
+                         opponent_unit="Trebuchet TBT-5S",
+                         max_game_rounds=0,
+                         perf_log=True)
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
     try:
@@ -221,14 +221,8 @@ def test_termination(megamek_dir, port, verbose):
 
 def test_cross_validation(megamek_dir, port, verbose):
     """Cross-validation: compare Python tactical features against Java."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=50,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        perf_log=True,
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=50, perf_log=True)
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
     try:
@@ -275,14 +269,8 @@ def test_cross_validation(megamek_dir, port, verbose):
 
 def test_persistent_reset(megamek_dir, port, verbose):
     """Persistent reset: 3 episodes on same JVM without cold restart."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=3,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        perf_log=True,
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=3, perf_log=True)
 
     num_episodes = 3
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
@@ -311,15 +299,10 @@ def test_persistent_reset(megamek_dir, port, verbose):
 
 def test_auto_wake_pilot(megamek_dir, port, verbose):
     """Auto-wake pilot: force unconscious on turn 1, verify auto-wake restores movement."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=50,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        auto_wake_pilot=True,
-        force_unconscious_on_turn=1,
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=50,
+                         auto_wake_pilot=True,
+                         force_unconscious_on_turn=1)
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
     try:
@@ -375,15 +358,10 @@ def test_auto_wake_pilot(megamek_dir, port, verbose):
 
 def test_fixed_deployment(megamek_dir, port, verbose):
     """Fixed deployment: units deploy at exact coords, consistent across episodes."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=3,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        rl_fixed_coords=(8, 2),
-        opponent_fixed_coords=(8, 14),
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=3,
+                         rl_fixed_coords=(8, 2),
+                         opponent_fixed_coords=(8, 14))
 
     board_w = config.resolved_board_width
     board_h = config.resolved_board_height
@@ -446,15 +424,10 @@ def test_board_consistency(megamek_dir, port, verbose):
     server to discard the configured board name as "unavailable" and silently
     fall back to a randomly-generated board every game.
     """
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=3,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-        rl_fixed_coords=(8, 2),
-        opponent_fixed_coords=(8, 14),
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=3,
+                         rl_fixed_coords=(8, 2),
+                         opponent_fixed_coords=(8, 14))
 
     num_episodes = 3
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
@@ -509,18 +482,16 @@ def test_board_consistency(megamek_dir, port, verbose):
             )
 
         # --- Check 3: board matches known properties of the configured board ---
-        # The default BattleForce 2 board has hex (7,0) with water, (9,1) with
-        # woods, and hex (8,5) at elevation 0 with no special features.
-        # A randomly-generated board would not match these reference elevations.
-        # We check that the RL start hex (8,2) has the same elevation as the
-        # file (elevation 0) and is NOT deep water or extreme elevation.
+        # The configured board should have the RL start hex (8,2) at a
+        # reasonable elevation.  A randomly-generated board would likely differ.
+        # We check that (8,2) is NOT deep water or extreme elevation.
         rl_elev = boards[0].get((8, 2), None)
         if rl_elev is None:
             return False, "RL start hex (8,2) not found on board"
         if abs(rl_elev) > 2:
             return False, (
                 f"RL start hex (8,2) has elevation {rl_elev} — "
-                f"expected near 0 for BattleForce 2 map (board may be randomly generated)"
+                f"expected near 0 for configured map (board may be randomly generated)"
             )
 
         # --- Check 4: RL unit has reasonable legal moves (not stuck) ---
@@ -543,13 +514,8 @@ def test_board_consistency(megamek_dir, port, verbose):
 
 def test_pilot_stats(megamek_dir, port, verbose):
     """Pilot stats: both units in mirror matchup have identical gunnery/piloting."""
-    config = MegaMekConfig(
-        megamek_dir=megamek_dir,
-        rl_port=port,
-        max_game_rounds=3,
-        firing_strategy="naive",
-        max_rotating_round_saves=0,
-    )
+    config = base_config(megamek_dir, port,
+                         max_game_rounds=3)
 
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
     try:
@@ -593,6 +559,82 @@ def test_pilot_stats(megamek_dir, port, verbose):
         env.close()
 
 
+def test_feature_distributions(megamek_dir, port, verbose):
+    """Feature distributions: per-move features must vary between legal moves."""
+    config = base_config(megamek_dir, port, max_game_rounds=50)
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+
+    board_w = config.resolved_board_width
+    board_h = config.resolved_board_height
+    board_size = board_w * board_h
+    move_offset = board_size + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+
+    constant_count = [0] * MOVE_FEATURES
+    total_multi_move_steps = 0
+
+    try:
+        for ep in range(2):
+            obs, info = env.reset()
+            # Collect from reset obs
+            n = info.get("n_legal_moves", 0)
+            if n >= 2:
+                move_block = obs[move_offset : move_offset + n * MOVE_FEATURES]
+                move_matrix = move_block.reshape(n, MOVE_FEATURES)
+                for f in range(MOVE_FEATURES):
+                    col = move_matrix[:, f]
+                    if np.all(col == col[0]):
+                        constant_count[f] += 1
+                total_multi_move_steps += 1
+
+            step = 0
+            while True:
+                n_legal = info.get("n_legal_moves", 0)
+                action = np.random.randint(0, max(n_legal, 1))
+                obs, reward, terminated, truncated, info = env.step(action)
+                step += 1
+
+                if terminated or truncated:
+                    break
+
+                n = info.get("n_legal_moves", 0)
+                if n >= 2:
+                    move_block = obs[move_offset : move_offset + n * MOVE_FEATURES]
+                    move_matrix = move_block.reshape(n, MOVE_FEATURES)
+                    for f in range(MOVE_FEATURES):
+                        col = move_matrix[:, f]
+                        if np.all(col == col[0]):
+                            constant_count[f] += 1
+                    total_multi_move_steps += 1
+
+                if step >= 500:
+                    break
+    finally:
+        env.close()
+
+    if total_multi_move_steps < 5:
+        return True, f"Insufficient data ({total_multi_move_steps} multi-move steps)"
+
+    # Report
+    dead_features = []
+    print(f"    Per-Move Feature Distributions ({total_multi_move_steps} multi-move steps):")
+    print(f"    {'Feature':<22s} {'Constant%':>9s}  Status")
+    for f in range(MOVE_FEATURES):
+        pct = constant_count[f] / total_multi_move_steps * 100
+        name = MOVE_FEATURE_NAMES[f]
+        if pct == 100.0:
+            status = "DEAD WEIGHT"
+            dead_features.append(name)
+        elif pct > 80.0:
+            status = "LOW VARIANCE"
+        else:
+            status = "OK"
+        print(f"    {name:<22s} {pct:8.1f}%  {status}")
+
+    if dead_features:
+        return False, f"Dead weight features (100% constant within-step): {', '.join(dead_features)}"
+    return True, f"All {MOVE_FEATURES} per-move features show within-step variance"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -607,6 +649,7 @@ TESTS = [
     ("Fixed Deployment", test_fixed_deployment, 6),
     ("Board Consistency", test_board_consistency, 7),
     ("Pilot Stats", test_pilot_stats, 8),
+    ("Feature Distributions", test_feature_distributions, 9),
 ]
 
 
