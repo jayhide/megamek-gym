@@ -62,7 +62,7 @@ The Java side lives at:
 
 **Gradle task** in `megamek/build.gradle` (~line 596):
 ```
-./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog"
+./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog|autoWakePilot"
 ```
 Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
@@ -108,6 +108,8 @@ train_ppo.py             # CleanRL-style PPO training script
 tb_summary.py            # TensorBoard run analyzer (text summaries, diagnostics, comparison)
 eval.py                  # Evaluation script for trained checkpoints
 clean_saves.py           # Delete training artifacts (saves, run dirs, logs, heap dumps)
+analyze_dedup.py         # Analyze move duplication at various key granularities
+analyze_full_moves.py    # Compare current (longest-only) vs full (Pareto frontier) legal moves
 ```
 
 ## Configuration
@@ -241,6 +243,22 @@ When the RL unit is prone with at least one destroyed leg (LL or RL with `intern
 ### Gymnasium info dict and AsyncVectorEnv
 
 Gymnasium's `AsyncVectorEnv._add_info()` merges info dicts from all envs into a single vectorized dict. It **cannot handle nested dicts or lists** (like `rl_unit`, `enemy_unit`, `legal_moves`) — it recurses into them and crashes when the structure differs between terminal and non-terminal steps. The `_build_info()` method in `env.py` only returns vector-safe types: scalars, numpy arrays, and `n_legal_moves` (an int count). If you need to add new info fields, keep them flat (no nested dicts/lists).
+
+### Unconscious pilot (prone + immobile with full MP)
+
+When a Mech falls, the pilot must pass a consciousness check. On failure, `crew.isUnconscious()` returns true, making `entity.isImmobile()` true even though the entity has full walk/run MP. The Mech gets only 1 legal move (stand still) until the pilot wakes up. The pilot retries each round — may wake up in 1 round or stay unconscious for several.
+
+**Auto-wake (enabled by default)**: The `auto_wake_pilot` config option (default `true`) makes the Java RL bridge automatically clear the unconscious flag on the RL entity before move enumeration. This prevents wasted training steps since RL bots don't have human pilots subject to consciousness checks. The auto-wake only applies to the RL entity; the opponent (Princess) is unaffected.
+
+**Symptom (when auto-wake is disabled)**: `n_legal_moves=1` for multiple consecutive rounds, entity position unchanged. Java log shows `enumerateLegalMoves: entity=... is IMMOBILE (prone=true shutdown=false crew_unconscious=true)`.
+
+### Mid-game reset sends action instead of reset
+
+`_reset_persistent()` sends `{"type": "reset"}` over the socket, but if the game is still in progress (not terminated/truncated), Java is waiting for an action, not a reset. Java's `ActionTranslator` can't parse the reset message (no `move_index` field), falls back to stand-still, and the game continues. Python reads the next observation thinking it's a new game. **This only affects scripts that call `env.reset()` before the game ends** (e.g., `analyze_dedup.py` with `--max-steps`). Training is unaffected because `AsyncVectorEnv` only resets after terminated/truncated.
+
+### Move deduplication (known, unfixed)
+
+`enumerateLegalMoves()` produces duplicate stand-still paths: the explicit stand-still (always added), plus the starting-position entry from both the forward and backward `LongestPathFinder`. When the entity is mobile, most duplicates are walk/run variants to the same (hex, facing) with different MP costs (~25-30% of moves are duplicates). These waste slots in the 400-move cap and add redundant actions. Deduplication by (hex, facing, move_category) is planned but not yet implemented.
 
 ### diagnose_reset.py
 
