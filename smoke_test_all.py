@@ -30,7 +30,7 @@ import numpy as np
 
 import megamek_gym  # noqa: F401 — registers MegaMekGym/MegaMek-v0
 from megamek_gym.config import MegaMekConfig
-from megamek_gym.observation import compute_obs_size
+from megamek_gym.observation import compute_obs_size, format_observation
 from tests.test_cross_validation import validate_observation
 
 
@@ -80,6 +80,9 @@ def run_episode(env, max_steps=500, action_fn=None, verbose=False):
 
     if verbose:
         print(f"    Reset complete. Obs shape: {obs_shape}, legal moves: {n_legal}")
+        inner = env.unwrapped
+        if inner._last_raw_obs:
+            print(format_observation(inner._last_raw_obs, inner._rl_owner_id))
 
     step = 0
     while True:
@@ -100,6 +103,10 @@ def run_episode(env, max_steps=500, action_fn=None, verbose=False):
             )
 
         if terminated or truncated:
+            if verbose:
+                inner = env.unwrapped
+                if inner._last_raw_obs:
+                    print(format_observation(inner._last_raw_obs, inner._rl_owner_id))
             return step, terminated, truncated, info, obs_shape
 
         if step >= max_steps:

@@ -240,3 +240,228 @@ def identify_rl_owner(obs: dict, active_entity_id: int) -> int:
     raise ValueError(
         f"Active entity {active_entity_id} not found in units"
     )
+
+
+_FACING_NAMES = ["N", "NE", "SE", "S", "SW", "NW"]
+
+
+def format_observation(obs: dict, rl_owner_id: int | None = None) -> str:
+    """Format a JSON observation dict as a readable multi-line string.
+
+    Args:
+        obs: Raw observation dict from the Java bridge.
+        rl_owner_id: RL player's owner ID. If None, inferred from active_entity_id.
+
+    Returns:
+        Human-readable multi-line string.
+    """
+    lines: list[str] = []
+    phase = obs.get("phase", "?")
+    rnd = obs.get("round", "?")
+    active_id = obs.get("active_entity_id", -1)
+    terminated = obs.get("terminated", False)
+    truncated = obs.get("truncated", False)
+
+    lines.append(f"=== OBSERVATION: Round {rnd}, Phase {phase} ===")
+
+    reward_str = f"{obs.get('reward', 0.0):.4f}"
+    rl_first = obs.get("rl_moves_first", False)
+    parts = [f"Active Entity: id={active_id}", f"Reward: {reward_str}",
+             f"Terminated: {terminated}", f"Truncated: {truncated}"]
+    if "rl_moves_first" in obs:
+        parts.append(f"RL Moves First: {rl_first}")
+    if "auto_wake_count" in obs:
+        parts.append(f"Auto-wake: {obs['auto_wake_count']}")
+    lines.append(" | ".join(parts))
+
+    # Terminal observation shortcut
+    if terminated or truncated:
+        outcome = obs.get("game_outcome")
+        if outcome:
+            lines.append(f"Game Outcome: {outcome}")
+        units = obs.get("units", [])
+        if not units:
+            return "\n".join(lines)
+
+    # Determine RL owner
+    if rl_owner_id is None and active_id >= 0:
+        units = obs.get("units", [])
+        for u in units:
+            if u["id"] == active_id:
+                rl_owner_id = u["owner"]
+                break
+
+    # Board
+    board = obs.get("board", {})
+    bw = board.get("width", 0)
+    bh = board.get("height", 0)
+    lines.append("")
+    lines.append(f"--- BOARD ({bw} x {bh}) ---")
+    hexes = board.get("hexes", [])
+    non_zero = [(h["x"], h["y"], h.get("elevation", 0)) for h in hexes
+                if h.get("elevation", 0) != 0]
+    if non_zero:
+        elev_strs = [f"({x},{y})={e}" for x, y, e in non_zero]
+        lines.append("Non-zero elevations: " + "  ".join(elev_strs))
+    else:
+        lines.append("All hexes at elevation 0")
+
+    # Units
+    units = obs.get("units", [])
+    rl_units = [u for u in units if rl_owner_id is not None and u.get("owner") == rl_owner_id]
+    enemy_units = [u for u in units if rl_owner_id is not None and u.get("owner") != rl_owner_id]
+
+    for label, unit_list in [("RL UNIT", rl_units), ("ENEMY UNIT", enemy_units)]:
+        for u in unit_list:
+            lines.append("")
+            chassis = u.get("chassis", "?")
+            model = u.get("model", "")
+            uid = u.get("id", "?")
+            owner = u.get("owner", "?")
+            name = f"{chassis} {model}".strip()
+            lines.append(f"--- {label}: {name} (id={uid}, owner={owner}) ---")
+
+            # Position and facing
+            x, y = u.get("x", -1), u.get("y", -1)
+            facing = u.get("facing", 0)
+            facing_name = _FACING_NAMES[facing] if 0 <= facing < 6 else str(facing)
+            pos_str = f"({x}, {y})" if x >= 0 else "undeployed"
+            mp_w, mp_r, mp_j = u.get("mp_walk", 0), u.get("mp_run", 0), u.get("mp_jump", 0)
+            heat = u.get("heat", 0)
+            lines.append(f"Position: {pos_str} facing {facing_name} | "
+                         f"MP: walk={mp_w} run={mp_r} jump={mp_j} | Heat: {heat}")
+
+            # Status flags
+            flags = []
+            if u.get("prone"):
+                flags.append("PRONE")
+            if u.get("destroyed"):
+                flags.append("DESTROYED")
+            if u.get("retreated"):
+                flags.append("RETREATED")
+            if u.get("deployed"):
+                flags.append("deployed")
+            else:
+                flags.append("not deployed")
+            lines.append(f"Status: {', '.join(flags)}")
+
+            # Armor - build location abbreviation map for weapons
+            armor_locs = u.get("armor", [])
+            loc_abbrs: dict[int, str] = {}
+            armor_parts = []
+            for loc_idx, loc in enumerate(armor_locs):
+                abbr = loc.get("location", f"L{loc_idx}")
+                loc_abbrs[loc_idx] = abbr
+                a, a_max = loc.get("armor", 0), loc.get("armor_max", 0)
+                i, i_max = loc.get("internal", 0), loc.get("internal_max", 0)
+                destroyed = a <= 0 and i <= 0
+                part = f"{abbr} {a}/{a_max}"
+                if "rear_armor" in loc:
+                    ra, ra_max = loc["rear_armor"], loc.get("rear_armor_max", 0)
+                    part += f"({ra}/{ra_max}r)"
+                if loc.get("internal_max", 0) > 0:
+                    part += f" is={i}/{i_max}"
+                if destroyed:
+                    part += " [DEST]"
+                armor_parts.append(part)
+            lines.append("Armor: " + "  ".join(armor_parts))
+
+            # Weapons
+            weapons = u.get("weapons", [])
+            if weapons:
+                wpn_strs = []
+                for w in weapons:
+                    wname = w.get("name", "?")
+                    wloc = w.get("location", -1)
+                    loc_name = loc_abbrs.get(wloc, f"L{wloc}")
+                    status = "DEST" if w.get("destroyed") else "ok"
+                    dmg = w.get("damage", 0)
+                    sr = w.get("short_range", 0)
+                    mr = w.get("medium_range", 0)
+                    lr = w.get("long_range", 0)
+                    wpn_strs.append(f"{wname} [{loc_name}, {status}, dmg={dmg}, r={sr}/{mr}/{lr}]")
+                lines.append("Weapons: " + " | ".join(wpn_strs))
+            else:
+                lines.append("Weapons: none")
+
+    # Legal moves
+    moves = obs.get("legal_moves", [])
+    lines.append("")
+    if not moves:
+        lines.append("--- LEGAL MOVES (0) ---")
+    else:
+        is_deployment = "elevation" in moves[0] and "mp_used" not in moves[0]
+
+        if is_deployment:
+            lines.append(f"--- DEPLOYMENT MOVES ({len(moves)} total) ---")
+            # Show first 5
+            for m in moves[:5]:
+                idx = m.get("index", "?")
+                dx, dy = m.get("dest_x", "?"), m.get("dest_y", "?")
+                f = m.get("facing", 0)
+                fn = _FACING_NAMES[f] if 0 <= f < 6 else str(f)
+                elev = m.get("elevation", 0)
+                lines.append(f"  #{idx}: ({dx},{dy}) facing {fn}, elev={elev}")
+            if len(moves) > 5:
+                lines.append(f"  ... and {len(moves) - 5} more")
+        else:
+            # Movement moves - compute summary stats
+            mp_vals = [m.get("mp_used", 0) for m in moves]
+            xs = [m["dest_x"] for m in moves if m.get("dest_x", -1) >= 0]
+            ys = [m["dest_y"] for m in moves if m.get("dest_y", -1) >= 0]
+            n_jumping = sum(1 for m in moves if m.get("jumping"))
+            n_prone = sum(1 for m in moves if m.get("prone"))
+
+            mp_lo, mp_hi = min(mp_vals), max(mp_vals)
+            summary_parts = [f"MP range: {mp_lo}-{mp_hi}"]
+            if xs:
+                summary_parts.append(f"Dest x=[{min(xs)}..{max(xs)}], y=[{min(ys)}..{max(ys)}]")
+            if n_jumping:
+                summary_parts.append(f"Jumping: {n_jumping}")
+            if n_prone:
+                summary_parts.append(f"Prone: {n_prone}")
+
+            lines.append(f"--- LEGAL MOVES ({len(moves)} total) ---")
+            lines.append(" | ".join(summary_parts))
+
+            # Sample moves: first, a couple short, closest to enemy
+            sample_indices: list[int] = [0]  # always show first
+            # Add index 1 and 2 if they exist and aren't index 0
+            for si in [1, 2]:
+                if si < len(moves) and si not in sample_indices:
+                    sample_indices.append(si)
+            # A mid-range move
+            mid = len(moves) // 2
+            if mid not in sample_indices and mid < len(moves):
+                sample_indices.append(mid)
+            # Closest to enemy (by java_dist_to_enemy)
+            closest_idx = None
+            closest_dist = float("inf")
+            for i, m in enumerate(moves):
+                d = m.get("java_dist_to_enemy", -1)
+                if d >= 0 and d < closest_dist:
+                    closest_dist = d
+                    closest_idx = i
+            if closest_idx is not None and closest_idx not in sample_indices:
+                sample_indices.append(closest_idx)
+
+            lines.append("Sample moves:")
+            for i in sample_indices:
+                m = moves[i]
+                idx = m.get("index", i)
+                dx, dy = m.get("dest_x", -1), m.get("dest_y", -1)
+                f = m.get("facing", 0)
+                fn = _FACING_NAMES[f] if 0 <= f < 6 else str(f)
+                mp = m.get("mp_used", 0)
+                tags = []
+                if m.get("jumping"):
+                    tags.append("jumping")
+                if m.get("prone"):
+                    tags.append("prone")
+                d = m.get("java_dist_to_enemy", -1)
+                if i == closest_idx and d >= 0:
+                    tags.append(f"closest to enemy, dist={d:.1f}")
+                tag_str = f"  [{', '.join(tags)}]" if tags else ""
+                lines.append(f"  #{idx}: ({dx},{dy}) facing {fn}, {mp} MP{tag_str}")
+
+    return "\n".join(lines)
