@@ -102,10 +102,8 @@ def extract_units(text: str) -> list[dict]:
             continue
         name = name_m.group(1)
 
-        # Owner ID (skip observer entities with ownerId=0)
+        # Owner ID
         owner_m = re.search(r"<ownerId>(\d+)</ownerId>", block)
-        if owner_m and owner_m.group(1) == "0":
-            continue
 
         # Position
         pos_m = re.search(r"<position[^>]*>\s*<x>(\d+)</x>\s*<y>(\d+)</y>", block, re.DOTALL)
@@ -644,6 +642,295 @@ def get_round_reports(prev_save: dict, curr_save: dict) -> list[dict]:
     """Get only the new reports added in this round (reports are cumulative)."""
     prev_count = prev_save["n_reports"] if prev_save else 0
     return curr_save["reports"][prev_count:]
+
+
+# ---------------------------------------------------------------------------
+# Structured (JSON-serializable) variants for HTML viewers
+# ---------------------------------------------------------------------------
+
+def decode_combat_reports_structured(reports: list[dict]) -> list[dict]:
+    """Decode weapon attacks into structured dicts (no ANSI formatting).
+
+    Returns list of dicts with keys: attacker, weapon, target, tohit, roll,
+    result ("HIT"/"MISS"), location, missiles.
+    """
+    results = []
+    current_attacker = None
+    current_weapon = None
+    current_target = None
+    current_tohit = None
+    current_roll = None
+
+    for r in reports:
+        mid = r["messageId"]
+        td = r["tagData"]
+
+        if mid == 3100:
+            if td:
+                player = td[1] if len(td) >= 2 else None
+                current_attacker = _tag_name(extract_entity_name(td[0]), player)
+            current_weapon = None
+            current_target = None
+            current_tohit = None
+            current_roll = None
+
+        elif mid == 3115:
+            if len(td) >= 2:
+                current_weapon = td[0]
+                target_player = td[2] if len(td) >= 3 else None
+                current_target = _tag_name(extract_entity_name(td[1]), target_player)
+            current_tohit = None
+            current_roll = None
+
+        elif mid == 3150:
+            if td:
+                current_tohit = extract_tooltip_number(td[0])
+
+        elif mid == 3155:
+            if td:
+                current_roll = extract_tooltip_number(td[0])
+
+        elif mid == 3220:
+            if current_attacker and current_weapon and current_target:
+                results.append({
+                    "attacker": current_attacker, "weapon": current_weapon,
+                    "target": current_target, "tohit": current_tohit,
+                    "roll": current_roll, "result": "MISS",
+                    "location": None, "missiles": None,
+                })
+            current_weapon = None
+
+        elif mid == 3325:
+            count = td[0] if td else None
+            if current_attacker and current_weapon and current_target:
+                results.append({
+                    "attacker": current_attacker, "weapon": current_weapon,
+                    "target": current_target, "tohit": current_tohit,
+                    "roll": current_roll, "result": "HIT",
+                    "location": None, "missiles": count,
+                })
+            current_weapon = None
+
+        elif mid == 3405:
+            loc = td[1] if len(td) >= 2 else None
+            if current_attacker and current_weapon and current_target:
+                results.append({
+                    "attacker": current_attacker, "weapon": current_weapon,
+                    "target": current_target, "tohit": current_tohit,
+                    "roll": current_roll, "result": "HIT",
+                    "location": loc, "missiles": None,
+                })
+            current_weapon = None
+
+    return results
+
+
+def decode_damage_reports_structured(reports: list[dict]) -> list[dict]:
+    """Extract damage reports into structured dicts.
+
+    Returns list of dicts with keys: entity, amount, location.
+    """
+    results = []
+    entity_player_map: dict[str, str] = {}
+    for r in reports:
+        mid = r["messageId"]
+        td = r["tagData"]
+        if mid == 3100 and len(td) >= 2:
+            entity_player_map[extract_entity_name(td[0])] = td[1]
+        elif mid == 3115 and len(td) >= 3:
+            entity_player_map[extract_entity_name(td[1])] = td[2]
+        elif mid == 6065 and len(td) >= 4:
+            entity = extract_entity_name(td[0])
+            player = entity_player_map.get(entity)
+            results.append({
+                "entity": _tag_name(entity, player),
+                "amount": td[2],
+                "location": td[3],
+            })
+    return results
+
+
+def diff_units_structured(prev_units: list[dict], curr_units: list[dict]) -> list[dict]:
+    """Compare unit state between rounds, return structured movement dicts.
+
+    Returns list of dicts with keys: name, from_pos, to_pos, facing, move_type,
+    prone_change ("fell"/"stood"/None).
+    """
+    results = []
+    prev_by_name = {u["name"]: u for u in prev_units}
+
+    for curr in curr_units:
+        name = curr["name"]
+        prev = prev_by_name.get(name)
+        if not prev:
+            continue
+
+        was_prone = prev.get("prone", False)
+        is_prone = curr.get("prone", False)
+        prone_change = None
+        if is_prone and not was_prone:
+            prone_change = "fell"
+        elif not is_prone and was_prone:
+            prone_change = "stood"
+
+        effective_moved = curr.get("moved_last", curr["moved"])
+        if effective_moved == "MOVE_NONE":
+            effective_moved = curr["moved"]
+
+        if curr["pos"] != prev["pos"] or effective_moved != "MOVE_NONE" or prone_change:
+            move_type = MOVE_NAMES.get(effective_moved, effective_moved)
+            facing_str = FACING_NAMES[curr["facing"]] if 0 <= curr["facing"] < 6 else "?"
+            results.append({
+                "name": name,
+                "from_pos": list(prev["pos"]) if prev["pos"] else None,
+                "to_pos": list(curr["pos"]) if curr["pos"] else None,
+                "facing": facing_str,
+                "move_type": move_type,
+                "prone_change": prone_change,
+            })
+
+    return results
+
+
+def armor_summary_structured(unit: dict) -> dict:
+    """Return structured armor/internal summary for a unit.
+
+    Returns dict with keys: name, armor_current, armor_max, pct,
+    internal_current, internal_max, heat, prone, destroyed, damaged_locs.
+    """
+    armor = unit.get("armor", [])
+    orig_armor = unit.get("orig_armor", [])
+    internal = unit.get("internal", [])
+    orig_internal = unit.get("orig_internal", [])
+
+    total_armor = sum(max(0, v) for v in armor) if armor else 0
+    total_orig = sum(orig_armor) if orig_armor else 0
+    total_internal = sum(max(0, v) for v in internal) if internal else 0
+    total_orig_internal = sum(orig_internal) if orig_internal else 0
+    pct = (total_armor / total_orig * 100) if total_orig > 0 else 0
+
+    damaged_locs = []
+    for i, loc in enumerate(LOCATIONS):
+        if i < len(armor) and i < len(orig_armor):
+            a = max(0, armor[i])
+            if a < orig_armor[i]:
+                damaged_locs.append({"loc": loc, "type": "armor",
+                                     "current": a, "max": orig_armor[i]})
+        if i < len(internal) and i < len(orig_internal):
+            s = max(0, internal[i])
+            if s < orig_internal[i]:
+                damaged_locs.append({"loc": loc, "type": "internal",
+                                     "current": s, "max": orig_internal[i],
+                                     "destroyed": s == 0})
+
+    return {
+        "name": unit["name"],
+        "armor_current": total_armor,
+        "armor_max": total_orig,
+        "pct": round(pct, 1),
+        "internal_current": total_internal,
+        "internal_max": total_orig_internal,
+        "heat": unit.get("heat", 0),
+        "prone": unit.get("prone", False),
+        "destroyed": unit.get("destroyed", False),
+        "damaged_locs": damaged_locs,
+    }
+
+
+def build_round_transcript(saves: list[dict], step_log: list[dict],
+                           autosave_path=None) -> list[dict]:
+    """Build JSON-serializable transcript data from parsed saves and step_log.
+
+    Args:
+        saves: List of parsed save dicts (from parse_save()).
+        step_log: List of per-step dicts with round, phase, action, reward, etc.
+        autosave_path: Optional path to autosave file for final round combat data.
+
+    Returns list of round dicts, each with keys: round, initiative, movement,
+    combat, damage, unit_status, rl_steps.
+    """
+    # Group step_log by round
+    steps_by_round: dict[int, list[dict]] = {}
+    for s in step_log:
+        steps_by_round.setdefault(s["round"], []).append(s)
+
+    rounds = []
+    for i, save in enumerate(saves):
+        round_num = save["round"]
+        prev_save = saves[i - 1] if i > 0 else None
+
+        rd: dict = {"round": round_num}
+
+        # Initiative
+        init = save.get("initiative")
+        if init and init.get("rolls"):
+            rd["initiative"] = {
+                "rolls": init["rolls"],
+                "first_mover": init.get("first_mover_name"),
+            }
+        else:
+            rd["initiative"] = None
+
+        # Movement
+        if prev_save:
+            rd["movement"] = diff_units_structured(prev_save["units"], save["units"])
+        else:
+            rd["movement"] = []
+
+        # Combat
+        round_reports = get_round_reports(prev_save, save)
+        rd["combat"] = decode_combat_reports_structured(round_reports)
+        rd["damage"] = decode_damage_reports_structured(round_reports)
+
+        # Unit status
+        rd["unit_status"] = [armor_summary_structured(u) for u in save["units"]]
+
+        # RL steps for this round
+        round_steps = steps_by_round.get(round_num, [])
+        rd["rl_steps"] = []
+        for s in round_steps:
+            step_data = {
+                "phase": "GAME_END" if s.get("phase") == "VICTORY" else s.get("phase", ""),
+                "action": s.get("action"),
+                "n_legal_moves": s.get("n_legal_moves", 0),
+                "reward": round(s.get("reward", 0), 4),
+                "cumulative": round(s.get("cumulative_return", 0), 4),
+            }
+            details = s.get("reward_details", [])
+            nonzero = [(name, round(weighted, 4))
+                       for name, raw, weighted in details if abs(weighted) > 1e-6]
+            if nonzero:
+                step_data["components"] = [
+                    {"name": name.replace("Reward", "").replace("DamageDelta", "Damage")
+                     .replace("LocationDestruction", "LocDestroy")
+                     .replace("RangeAdvantage", "Range"),
+                     "value": val}
+                    for name, val in nonzero
+                ]
+            rd["rl_steps"].append(step_data)
+
+        rounds.append(rd)
+
+    # Handle autosave (final round combat data)
+    if autosave_path and saves:
+        final_save = parse_save(autosave_path)
+        last_round_save = saves[-1]
+        final_reports = get_round_reports(last_round_save, final_save)
+
+        if final_reports:
+            final_rd = {
+                "round": last_round_save["round"],
+                "is_final": True,
+                "initiative": None,
+                "movement": [],
+                "combat": decode_combat_reports_structured(final_reports),
+                "damage": decode_damage_reports_structured(final_reports),
+                "unit_status": [armor_summary_structured(u) for u in final_save["units"]],
+                "rl_steps": [],
+            }
+            rounds.append(final_rd)
+
+    return rounds
 
 
 def main():

@@ -50,6 +50,7 @@ class MegaMekConfig:
     force_unconscious_on_turn: int = 0
     rl_fixed_coords: tuple[int, int] | None = None
     opponent_fixed_coords: tuple[int, int] | None = None
+    enable_game_reports: bool = False
 
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"
