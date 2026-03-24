@@ -6,7 +6,7 @@ from megamek_gym.reward import (
     CompositeReward, CoverReward, DamageDeltaReward, LocationDestructionReward,
     PronePenaltyReward, RangeAdvantageReward, WinLossReward,
     cover_value, _get_prone_status, hex_bearing, hex_distance,
-    in_firing_arc, range_quality,
+    in_firing_arc, in_firing_arc_with_twist, range_quality,
 )
 
 
@@ -514,39 +514,24 @@ class TestRangeQualityWithFacing:
         assert score == pytest.approx(0.5)
 
     def test_mixed_weapons_in_and_out_of_arc(self):
-        """One weapon in arc, one out — damage-weighted average."""
-        # Both at short range (score 1.0 base), but one in CT (in arc) and one in CT facing away
-        # Let's use: facing 0 (north), target east at bearing ~90° (boundary)
-        # CT weapon at 90° is at the boundary (in arc), but target at 150° would be out
-        # Use: facing 0, target due south (180°)
-        # CT weapon: out of arc → 1.0 * 0.5 = 0.5
-        # RA weapon (loc 4): also out since 180° > 150° → 1.0 * 0.5 = 0.5
-        # LA weapon (loc 5): also out since 180° → left_diff = (0-180)%360 = 180 > 150 → out
-        # Better test: facing 0, target at 120° bearing
-        # CT (loc 1): 120° > 90° → out of arc → score * 0.5
-        # RA (loc 4): 120° ≤ 150° → in arc → full score
+        """One weapon in arc (with twist), one out — damage-weighted average.
+
+        Facing 0 (north), target due south (bearing ~180°).
+        With twist-aware arcs (±1 hex-side = ±60°), forward arc covers up to ±120°.
+        180° is still outside forward arc even with twist, but RA (loc 4) with
+        twist left (-1 = facing 5) has arc covering up to 180°.
+
+        Use leg weapon (loc 6, forward arc, no twist) as the "definitely out" weapon.
+        """
         unit = {"weapons": [
-            _weapon(5, 3, 6, 9, location=1),   # CT — out of forward arc at 120°
-            _weapon(5, 3, 6, 9, location=4),   # RA — in extended right arc at 120°
+            _weapon(10, 3, 6, 9, location=6),  # RL — leg, no twist, 180° is out
+            _weapon(5, 3, 6, 9, location=4),   # RA — twist right brings 180° in
         ]}
-        # We need actual hex coords that produce ~120° bearing
-        # (0,0) to (2,2): bearing should be roughly south-east
-        # Let's just test with explicit bearing by using _range_quality directly
-        # Facing 0, and we pick coords where bearing ≈ 120°
-        # For a clean test, use facing=0 and south (180°) target
-        # CT: out → 1.0 * 0.5 = 0.5, weighted by damage 5
-        # RA (loc 4): 180° > 150° → also out → 1.0 * 0.5 = 0.5
-        # That's not interesting. Let me use facing=1 (60°) and bearing ~120° target
-        # Forward arc: 60° ± 90° = [-30°, 150°] → 330°-150°. Bearing 180° is outside.
-        # RA extends right to 60°+150° = 210°. Bearing 180° < 210° → in arc.
-        unit_facing1 = {"weapons": [
-            _weapon(10, 3, 6, 9, location=1),  # CT — out of forward arc at 180°
-            _weapon(5, 3, 6, 9, location=4),   # RA — in extended arc at 180°
-        ]}
-        score = range_quality(unit_facing1, 2, target_x=5, target_y=7,
-                                unit_x=5, unit_y=5, unit_facing=1)
-        # CT: short range = 1.0 * 0.5 (out of arc) = 0.5, weight 10
-        # RA: short range = 1.0 (in arc), weight 5
+        score = range_quality(unit, 2, target_x=5, target_y=7,
+                                unit_x=5, unit_y=5, unit_facing=0)
+        # RL: short range 1.0 * 0.5 (out of arc, no twist), weight 10
+        # RA: need to check — facing 0, twist +1 → facing 1 (60°).
+        #   RA arc at facing 1: target = (180-60)%360 = 120. RA: target<=120 → in arc!
         # Weighted avg: (10*0.5 + 5*1.0) / 15 = 10/15 = 0.6667
         assert score == pytest.approx(10.0 / 15.0, abs=0.05)
 
@@ -1079,3 +1064,57 @@ class TestPronePenaltyReward:
 
         obs2 = _make_prone_obs(rl_prone=True, rl_destroyed=True)
         assert r.compute(obs1, obs2, False) == 0.0
+
+
+# --- Firing arc with torso twist ---
+
+class TestInFiringArcWithTwist:
+    def test_twist_brings_ct_into_arc(self):
+        """CT weapon just outside forward arc — twist ±1 brings it in."""
+        # Facing 0 (north), target at 90° → outside forward arc (±60°)
+        assert in_firing_arc(0, 1, 90.0) is False
+        # But twisting right (+1 = facing 1 = 60°) brings 90° into forward arc
+        assert in_firing_arc_with_twist(0, 1, 90.0) is True
+
+    def test_no_twist_needed(self):
+        """Target already in arc without twist."""
+        assert in_firing_arc_with_twist(0, 1, 30.0) is True
+
+    def test_twist_insufficient(self):
+        """Target too far behind — even ±1 twist can't reach it."""
+        # Facing 0 (north), target at 180° (due south) — ±1 twist covers up to ±120°
+        assert in_firing_arc_with_twist(0, 1, 180.0) is False
+
+    def test_leg_weapon_no_twist(self):
+        """Leg weapons use primary facing only — twist doesn't help."""
+        # Facing 0, target at 90° → outside forward arc
+        assert in_firing_arc(0, 6, 90.0) is False
+        # Twist doesn't help legs
+        assert in_firing_arc_with_twist(0, 6, 90.0) is False
+        assert in_firing_arc_with_twist(0, 7, 90.0) is False
+
+    def test_arm_weapon_twist(self):
+        """Arm weapon benefits from twist to widen effective coverage."""
+        # Facing 0 (north), RA (loc 4), target at 160° — outside RA arc (≤120°)
+        assert in_firing_arc(0, 4, 160.0) is False
+        # Twist right (+1 = facing 1): RA arc now covers up to 180° → 160° is in
+        assert in_firing_arc_with_twist(0, 4, 160.0) is True
+
+    def test_max_twist_0_same_as_no_twist(self):
+        """max_twist=0 should behave identically to in_firing_arc."""
+        assert in_firing_arc_with_twist(0, 1, 90.0, max_twist=0) is False
+        assert in_firing_arc_with_twist(0, 1, 30.0, max_twist=0) is True
+
+    def test_max_twist_2_extended(self):
+        """Extended twist (±2) reaches further."""
+        # Facing 0, CT, target at 150° → ±1 twist can't reach, ±2 can
+        # Twist +2 = facing 2 (120°): forward arc covers 120° ± 60° = [60°, 180°]
+        assert in_firing_arc_with_twist(0, 1, 150.0, max_twist=1) is False
+        assert in_firing_arc_with_twist(0, 1, 150.0, max_twist=2) is True
+
+    def test_twist_left(self):
+        """Twist left brings left-side targets into arc."""
+        # Facing 0 (north), CT, target at 270° (due west) → outside forward arc
+        assert in_firing_arc(0, 1, 270.0) is False
+        # Twist left (-1 = facing 5 = 300°): forward arc covers 300° ± 60° = [240°, 360°]
+        assert in_firing_arc_with_twist(0, 1, 270.0) is True

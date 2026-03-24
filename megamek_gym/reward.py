@@ -295,6 +295,35 @@ def in_firing_arc(facing: int, weapon_location: int, bearing: float) -> bool:
         return target >= 300 or target <= 60
 
 
+def in_firing_arc_with_twist(facing: int, weapon_location: int, bearing: float,
+                              max_twist: int = 1) -> bool:
+    """Check if a weapon can fire at a target considering torso twist.
+
+    Standard bipedal mechs can twist ±1 hex-side during the firing phase,
+    rotating all upper-body weapons (HD, CT, RT, LT, RA, LA). Leg weapons
+    (RL=6, LL=7) use the primary (leg) facing and are unaffected by twist.
+
+    Args:
+        facing: Unit facing (0-5) after movement.
+        weapon_location: MegaMek location index (0=HD, 1=CT, 2=RT, 3=LT, 4=RA, 5=LA, 6=RL, 7=LL)
+        bearing: Compass bearing to target in degrees.
+        max_twist: Maximum twist in hex-sides (1 for standard, 2 for extended twist quirk).
+
+    Returns:
+        True if the weapon can fire at the target from any achievable twist.
+    """
+    # Leg weapons don't twist — only check primary facing
+    if weapon_location in (6, 7):
+        return in_firing_arc(facing, weapon_location, bearing)
+
+    # Check all achievable twist positions
+    for twist in range(-max_twist, max_twist + 1):
+        twisted_facing = (facing + twist) % 6
+        if in_firing_arc(twisted_facing, weapon_location, bearing):
+            return True
+    return False
+
+
 def range_quality(unit: dict, distance: int,
                    target_x: int | None = None, target_y: int | None = None,
                    unit_x: int | None = None, unit_y: int | None = None,
@@ -343,10 +372,10 @@ def range_quality(unit: dict, distance: int,
         else:
             score = -0.5
 
-        # Apply out-of-arc penalty
+        # Apply out-of-arc penalty (twist-aware: assumes optimal torso twist)
         if bearing is not None:
             weapon_loc = w.get("location", 1)  # default CT (always in forward arc)
-            if not in_firing_arc(unit_facing, weapon_loc, bearing):
+            if not in_firing_arc_with_twist(unit_facing, weapon_loc, bearing):
                 score *= 0.5
 
         total_score += score * damage
