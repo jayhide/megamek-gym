@@ -71,6 +71,7 @@ class JavaProcess:
         opponent_fixed_coords: tuple[int, int] | None = None,
         enable_game_reports: bool = False,
         validate_caches: bool = False,
+        enable_path_cache: bool = True,
     ):
         self.megamek_dir = Path(megamek_dir).resolve()
         self.rl_unit = rl_unit
@@ -95,6 +96,7 @@ class JavaProcess:
         self.opponent_fixed_coords = opponent_fixed_coords
         self.enable_game_reports = enable_game_reports
         self.validate_caches = validate_caches
+        self.enable_path_cache = enable_path_cache
         self._process: subprocess.Popen | None = None
         self._stderr_file = None
 
@@ -188,6 +190,7 @@ class JavaProcess:
             str(self.opponent_fixed_coords[1] if self.opponent_fixed_coords else -1),
             str(self.enable_game_reports).lower(),
             str(self.validate_caches).lower(),
+            str(self.enable_path_cache).lower(),
         ]
         cmd = [
             "java",
