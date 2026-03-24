@@ -21,3 +21,8 @@ dist/
 # Training runs (TensorBoard logs, checkpoints)
 runs/
 inspected_games/
+
+# Generated artifacts
+*.html
+*.png
+game_viewer_saves*/

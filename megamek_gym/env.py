@@ -200,6 +200,7 @@ class MegaMekEnv(gymnasium.Env):
             rl_fixed_coords=cfg.rl_fixed_coords,
             opponent_fixed_coords=cfg.opponent_fixed_coords,
             enable_game_reports=cfg.enable_game_reports,
+            validate_caches=cfg.validate_caches,
         )
         self._java.start()
 

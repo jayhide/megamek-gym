@@ -60,10 +60,15 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "configs" / "default.yaml"
 
 
 def base_config(megamek_dir, port, **overrides):
-    """Load default.yaml and apply per-test overrides."""
+    """Load default.yaml and apply per-test overrides.
+
+    Enables cache validation by default so smoke tests verify that precomputed
+    LOS and damage-at-range caches match freshly computed values.
+    """
     config = MegaMekConfig.load(str(DEFAULT_CONFIG_PATH))
     config.megamek_dir = megamek_dir
     config.rl_port = port
+    config.validate_caches = True
     for k, v in overrides.items():
         setattr(config, k, v)
     return config

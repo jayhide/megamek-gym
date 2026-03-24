@@ -51,6 +51,7 @@ class MegaMekConfig:
     rl_fixed_coords: tuple[int, int] | None = None
     opponent_fixed_coords: tuple[int, int] | None = None
     enable_game_reports: bool = False
+    validate_caches: bool = False
 
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"
