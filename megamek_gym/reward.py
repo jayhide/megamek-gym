@@ -393,11 +393,26 @@ class RangeAdvantageReward(RewardFunction):
             return 0.0
 
         rl_x, rl_y = rl_unit["x"], rl_unit["y"]
-        ex, ey = enemy_unit["x"], enemy_unit["y"]
-        dist = hex_distance(rl_x, rl_y, ex, ey)
+
+        # Use post-movement enemy position if available. This is the enemy's
+        # position after the previous round's movement phase completed, captured
+        # at the start of the firing phase. This avoids the ~50% reward error
+        # that occurs when initiative changes between rounds (the live enemy
+        # position in units[] may reflect an extra move from the current round).
+        pm_ex = curr_obs.get("prev_round_enemy_x", -1)
+        pm_ey = curr_obs.get("prev_round_enemy_y", -1)
+        pm_facing = curr_obs.get("prev_round_enemy_facing", -1)
+
+        if pm_ex >= 0 and pm_ey >= 0:
+            ex, ey = pm_ex, pm_ey
+            enemy_facing = pm_facing if pm_facing >= 0 else enemy_unit.get("facing")
+        else:
+            ex, ey = enemy_unit["x"], enemy_unit["y"]
+            enemy_facing = enemy_unit.get("facing")
 
         rl_facing = rl_unit.get("facing")
-        enemy_facing = enemy_unit.get("facing")
+
+        dist = hex_distance(rl_x, rl_y, ex, ey)
 
         rl_quality = range_quality(
             rl_unit, dist,

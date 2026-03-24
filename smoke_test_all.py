@@ -567,6 +567,7 @@ def test_feature_distributions(megamek_dir, port, verbose):
     board_w = config.resolved_board_width
     board_h = config.resolved_board_height
     board_size = board_w * board_h
+    max_moves = config.max_legal_moves
     move_offset = board_size + 2 * UNIT_FEATURES + GLOBAL_FEATURES
 
     constant_count = [0] * MOVE_FEATURES
@@ -575,8 +576,8 @@ def test_feature_distributions(megamek_dir, port, verbose):
     try:
         for ep in range(2):
             obs, info = env.reset()
-            # Collect from reset obs
-            n = info.get("n_legal_moves", 0)
+            # Collect from reset obs (cap at max_legal_moves — obs is zero-padded beyond that)
+            n = min(info.get("n_legal_moves", 0), max_moves)
             if n >= 2:
                 move_block = obs[move_offset : move_offset + n * MOVE_FEATURES]
                 move_matrix = move_block.reshape(n, MOVE_FEATURES)
@@ -596,7 +597,7 @@ def test_feature_distributions(megamek_dir, port, verbose):
                 if terminated or truncated:
                     break
 
-                n = info.get("n_legal_moves", 0)
+                n = min(info.get("n_legal_moves", 0), max_moves)
                 if n >= 2:
                     move_block = obs[move_offset : move_offset + n * MOVE_FEATURES]
                     move_matrix = move_block.reshape(n, MOVE_FEATURES)

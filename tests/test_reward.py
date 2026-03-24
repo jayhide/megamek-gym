@@ -773,6 +773,48 @@ class TestRangeAdvantageReward:
         # Pure absolute: 1.0 * 1.0 = 1.0 (enemy quality ignored)
         assert reward == pytest.approx(1.0)
 
+    def test_prev_round_enemy_position_used_for_reward(self):
+        """When prev_round_enemy_* fields are present, use them instead of units[] enemy pos."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        # Build obs where units[] enemy is at (15, 0) = out of range,
+        # but prev_round_enemy is at (2, 0) = short range.
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=15, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],
+            enemy_weapons=[_weapon(5, 3, 6, 9)],
+        )
+        # Without prev_round fields: both out of range → -0.15
+        reward_without = r.compute({}, obs, False)
+        assert reward_without == pytest.approx(-0.15)
+
+        # Add prev_round fields pointing to (2, 0) = short range
+        # Use facing=-1 so it falls back to enemy_unit facing (None → no arc check)
+        obs["prev_round_enemy_x"] = 2
+        obs["prev_round_enemy_y"] = 0
+        obs["prev_round_enemy_facing"] = -1
+        reward_with = r.compute({}, obs, False)
+        # dist=2 → both short range, no facing → 0.3*1.0 + 0.7*0.0 = 0.3
+        assert reward_with == pytest.approx(0.3)
+
+    def test_prev_round_enemy_position_negative_means_unavailable(self):
+        """prev_round_enemy_x == -1 means no data; fall back to units[] position."""
+        r = RangeAdvantageReward()
+        r.reset()
+        r.set_rl_owner(0)
+        obs = _make_range_obs(
+            rl_x=0, rl_y=0, enemy_x=2, enemy_y=0,
+            rl_weapons=[_weapon(5, 3, 6, 9)],
+            enemy_weapons=[_weapon(5, 3, 6, 9)],
+        )
+        obs["prev_round_enemy_x"] = -1
+        obs["prev_round_enemy_y"] = -1
+        obs["prev_round_enemy_facing"] = -1
+        reward = r.compute({}, obs, False)
+        # Falls back to units[] enemy at (2, 0) → short range → 0.3
+        assert reward == pytest.approx(0.3)
+
 
 # --- Cover value helper ---
 
