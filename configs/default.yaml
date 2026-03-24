@@ -1,20 +1,20 @@
 megamek_dir: ../megamek
-rl_unit: Commando COM-2D
-opponent_unit: Commando COM-2D
-board: Map Set 6/16x17 BattleForce 2
+rl_unit: Trebuchet TBT-5S
+opponent_unit: Trebuchet TBT-5S
+board: Map Set 6/16x17 Woodland
 rl_port: 9999
 env_index: 0
 java_timeout_minutes: 5
 connection_retries: 60
 connection_retry_delay: 1.0
-max_legal_moves: 400
+max_legal_moves: 500
 max_rotating_round_saves: 0
 paranoid_autosave: false
 save_budget_mb: 1000
 rl_starting_pos: 2
 opponent_starting_pos: 6
 rl_fixed_coords: [8, 1]
-opponent_fixed_coords: [8, 15]
+opponent_fixed_coords: [8, 16]
 rl_deployment: false
 firing_strategy: princess
 step_timeout_seconds: 30

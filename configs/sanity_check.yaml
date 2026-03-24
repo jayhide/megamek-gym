@@ -1,12 +1,12 @@
 megamek_dir: ../megamek
-rl_unit: Commando COM-2D
-opponent_unit: Commando COM-2D
-board: Map Set 6/16x17 BattleForce 2
+rl_unit: Trebuchet TBT-5S
+opponent_unit: Trebuchet TBT-5S
+board: Map Set 6/16x17 Woodland
 rl_port: 9999
 java_timeout_minutes: 5
 connection_retries: 60
 connection_retry_delay: 1.0
-max_legal_moves: 400
+max_legal_moves: 500
 max_rotating_round_saves: 0
 paranoid_autosave: false
 save_budget_mb: 1000
@@ -20,12 +20,12 @@ step_timeout_seconds: 30
 max_game_rounds: 40
 
 # Training
-exp_name: sanity-check-v2
-num_envs: 20
+exp_name: sanity-check-v3
+num_envs: 22
 stagger_delay: 3.0
-total_timesteps: 500000
+total_timesteps: 1000000
 num_steps: 128
 hidden_size: 256
-ent_coef: 0.01
-learning_rate: 0.001
+ent_coef: 0.05
+learning_rate: 0.0003
 save_interval: 25

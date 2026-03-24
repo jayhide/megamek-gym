@@ -404,9 +404,6 @@ function renderRound(rd, cutoff) {{
 
   // cutoff === 'all' from here
 
-  // RL steps after first mover (if RL moved first)
-  if (rlMovesFirst) h += renderRLSteps(rd);
-
   // Second mover movement
   const sm = rd.second_movement || [];
   if (sm.length > 0) {{
@@ -414,9 +411,6 @@ function renderRound(rd, cutoff) {{
     h += `<div class="section-label">Movement (${{escHtml(moverLabel)}})</div>`;
     h += renderMovementEntries(sm);
   }}
-
-  // RL steps after second mover (if RL moved second)
-  if (!rlMovesFirst) h += renderRLSteps(rd);
 
   // Combat
   if (rd.combat && rd.combat.length > 0) {{
@@ -462,6 +456,9 @@ function renderRound(rd, cutoff) {{
       h += `<div class="unit-status">${{line}}</div>`;
     }}
   }}
+
+  // RL steps (reward breakdown) at end of round
+  h += renderRLSteps(rd);
 
   return h;
 }}
