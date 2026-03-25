@@ -3,6 +3,7 @@ import dataclasses
 from distutils.util import strtobool
 import logging
 import os
+from pathlib import Path
 import signal
 import sys
 import time
@@ -92,18 +93,23 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # Load base config
-    cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
-
-    # Apply CLI overrides: any non-None CLI value overwrites the config field
+    # Collect CLI overrides (non-None, non-session values) for re-application
+    cli_overrides = {}
     for cli_key, cli_val in vars(args).items():
         if cli_key in _SESSION_ONLY or cli_val is None:
             continue
         config_key = _CLI_TO_CONFIG_RENAMES.get(cli_key, cli_key)
+        cli_overrides[config_key] = cli_val
+
+    # Load base config
+    cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
+
+    # Apply CLI overrides
+    for config_key, cli_val in cli_overrides.items():
         if hasattr(cfg, config_key):
             setattr(cfg, config_key, cli_val)
 
-    return cfg, args
+    return cfg, args, cli_overrides
 
 
 _shutting_down = False
@@ -114,7 +120,20 @@ if __name__ == "__main__":
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    cfg, args = parse_args()
+    cfg, args, cli_overrides = parse_args()
+
+    # Load checkpoint early if resuming (needed for config and run_name)
+    checkpoint = None
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location="cpu")
+        # Use checkpoint config as base if no --config was explicitly provided
+        if not args.config:
+            cfg = MegaMekConfig(**checkpoint["config"])
+            # Re-apply CLI overrides on top of checkpoint config
+            for config_key, cli_val in cli_overrides.items():
+                if hasattr(cfg, config_key):
+                    setattr(cfg, config_key, cli_val)
+
     batch_size = cfg.num_envs * cfg.num_steps
     minibatch_size = batch_size // cfg.num_minibatches
 
@@ -125,7 +144,12 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
 
-    run_name = f"{cfg.exp_name}__{cfg.seed}__{int(time.time())}"
+    # Reuse original run directory when resuming
+    if checkpoint is not None:
+        run_name = checkpoint.get("run_name", Path(args.resume).parent.parent.name)
+    else:
+        run_name = f"{cfg.exp_name}__{cfg.seed}__{int(time.time())}"
+
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n" + "\n".join(
         [f"|{key}|{value}|" for key, value in dataclasses.asdict(cfg).items()]
@@ -164,10 +188,14 @@ if __name__ == "__main__":
         agent = Agent(envs.single_observation_space.shape[0], envs.single_action_space.n, hidden_size=cfg.hidden_size).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
-        if args.resume:
-            checkpoint = torch.load(args.resume, map_location=device)
+        if checkpoint is not None:
             agent.load_state_dict(checkpoint["model"])
             optimizer.load_state_dict(checkpoint["optimizer"])
+            # Move optimizer state to correct device
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
             global_step = checkpoint["global_step"]
             start_update = checkpoint["update"] + 1
             total_games = checkpoint.get("total_games", 0)
@@ -194,10 +222,26 @@ if __name__ == "__main__":
 
         # Start
         start_time = time.time()
-        if not args.resume:
+        resume_step_offset = checkpoint["global_step"] if checkpoint is not None else 0
+        if checkpoint is None:
             global_step = 0
 
         next_obs, info = envs.reset()
+
+        # Restore observation normalization running stats after envs are alive
+        if checkpoint is not None and "obs_rms" in checkpoint:
+            from gymnasium.wrappers.utils import RunningMeanStd
+            restored_rms = []
+            for state in checkpoint["obs_rms"]:
+                mean = np.array(state["mean"])
+                rms = RunningMeanStd(shape=mean.shape)
+                rms.mean = mean
+                rms.var = np.array(state["var"])
+                rms.count = state["count"]
+                restored_rms.append(rms)
+            envs.set_attr("obs_rms", restored_rms)
+            print(f"  Restored obs normalization stats (count={checkpoint['obs_rms'][0]['count']:.0f})")
+
         next_obs = torch.Tensor(next_obs).to(device)
         next_done = torch.zeros(cfg.num_envs).to(device)
         next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
@@ -221,7 +265,7 @@ if __name__ == "__main__":
         recent_returns = []
         recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
         recent_lengths = []
-        if not args.resume:
+        if checkpoint is None:
             total_games, total_wins, total_losses, total_draws, total_crashes, total_early_terms = 0, 0, 0, 0, 0, 0
             total_moves_truncated_steps = 0  # steps where legal moves exceeded max_legal_moves
             total_moves_truncated_count = 0  # total number of moves dropped across all steps
@@ -416,7 +460,8 @@ if __name__ == "__main__":
             writer.add_scalar("timing/train_seconds", train_s, global_step)
             writer.add_scalar("timing/episodes_per_rollout", episodes_this_rollout, global_step)
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+            session_steps = global_step - resume_step_offset
+            writer.add_scalar("charts/SPS", int(session_steps / (time.time() - start_time)), global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
             writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -436,7 +481,7 @@ if __name__ == "__main__":
             rollout_n_legal.clear()
 
             elapsed = time.time() - start_time
-            sps = int(global_step / elapsed)
+            sps = int(session_steps / elapsed)
             updates_done = update - start_update + 1
             eta_seconds = elapsed / updates_done * (num_updates - update)
             pct = 100.0 * update / num_updates
@@ -453,12 +498,16 @@ if __name__ == "__main__":
             # Checkpointing
             if update % cfg.save_interval == 0:
                 os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
-                checkpoint = {
+                save_checkpoint = {
                     "model": agent.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "global_step": global_step,
                     "update": update,
                     "config": dataclasses.asdict(cfg),
+                    "run_name": run_name,
+                    "obs_rms": [{"mean": rms.mean.tolist(), "var": rms.var.tolist(),
+                                 "count": float(rms.count)}
+                                for rms in envs.get_attr("obs_rms")],
                     "total_games": total_games,
                     "total_wins": total_wins,
                     "total_losses": total_losses,
@@ -468,8 +517,8 @@ if __name__ == "__main__":
                     "total_moves_truncated_steps": total_moves_truncated_steps,
                     "total_moves_truncated_count": total_moves_truncated_count,
                 }
-                torch.save(checkpoint, f"runs/{run_name}/checkpoints/step_{global_step}.pt")
-                torch.save(checkpoint, f"runs/{run_name}/checkpoints/latest.pt")
+                torch.save(save_checkpoint, f"runs/{run_name}/checkpoints/step_{global_step}.pt")
+                torch.save(save_checkpoint, f"runs/{run_name}/checkpoints/latest.pt")
 
                 elapsed = time.time() - start_time
                 summary_start = max(start_update, update - cfg.save_interval + 1)
@@ -499,12 +548,13 @@ if __name__ == "__main__":
                 recent_lengths.clear()
 
         elapsed = time.time() - start_time
-        sps = int(global_step / elapsed) if elapsed > 0 else 0
+        session_steps = global_step - resume_step_offset
+        sps = int(session_steps / elapsed) if elapsed > 0 else 0
         final_wr = total_wins / total_games * 100 if total_games > 0 else 0
         print(f"\nTraining complete. {global_step:,} steps in {fmt_time(elapsed)}. Final SPS: {sps}.")
         print(f"Total games: {total_games} (W:{total_wins} L:{total_losses} D:{total_draws} C:{total_crashes} E:{total_early_terms} — {final_wr:.1f}% win rate)")
         if total_moves_truncated_steps > 0:
-            total_steps = global_step - (checkpoint.get("global_step", 0) if args.resume else 0)
+            total_steps = global_step - resume_step_offset
             trunc_pct = total_moves_truncated_steps / max(total_steps, 1) * 100
             print(f"\n  WARNING: Legal moves exceeded max_legal_moves ({cfg.max_legal_moves}) on {total_moves_truncated_steps} steps ({trunc_pct:.2f}%).")
             print(f"           {total_moves_truncated_count} total moves were dropped (invisible to agent).")
@@ -513,7 +563,7 @@ if __name__ == "__main__":
         print(f"  Run directory:  runs/{run_name}")
         print(f"  Latest checkpoint: runs/{run_name}/checkpoints/latest.pt")
         print(f"\n  Resume training:")
-        print(f"    poetry run python train_ppo.py --megamek-dir {cfg.megamek_dir} --resume runs/{run_name}/checkpoints/latest.pt")
+        print(f"    poetry run python train_ppo.py --resume runs/{run_name}/checkpoints/latest.pt")
         print(f"\n  Evaluate:")
         print(f"    poetry run python eval.py --checkpoint runs/{run_name}/checkpoints/latest.pt --num-episodes 10")
         print(f"\n  TensorBoard:")
