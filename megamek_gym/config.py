@@ -52,8 +52,6 @@ class MegaMekConfig:
     opponent_fixed_coords: tuple[int, int] | None = None
     enable_game_reports: bool = False
     validate_caches: bool = False
-    enable_path_cache: bool = True
-
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"
     seed: int = 1

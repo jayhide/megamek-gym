@@ -63,7 +63,7 @@ The Java side lives at:
 
 **Gradle task** in `megamek/build.gradle` (~line 596):
 ```
-./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog|autoWakePilot|forceUnconsciousOnTurn|rlFixedX|rlFixedY|oppFixedX|oppFixedY|enableGameReports|validateCaches|enablePathCache"
+./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog|autoWakePilot|forceUnconsciousOnTurn|rlFixedX|rlFixedY|oppFixedX|oppFixedY|enableGameReports|validateCaches"
 ```
 Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
@@ -105,6 +105,7 @@ smoke_test.py            # Quick single-episode integration test with live Java 
 smoke_test_truncation.py # Tests max_game_rounds truncation (RL bot stands still)
 perf_test.py             # Multi-env startup timing and diagnostics
 mem_benchmark.py         # Measure memory usage across N parallel environments
+mem_growth.py            # Track JVM memory growth over many games (single JVM)
 train_ppo.py             # CleanRL-style PPO training script
 tb_summary.py            # TensorBoard run analyzer (text summaries, diagnostics, comparison)
 eval.py                  # Evaluation script for trained checkpoints
@@ -227,31 +228,6 @@ By default, the JVM stays alive between games. When `reset()` is called after a 
 
 **Performance:** Reset drops from ~3.3s (cold JVM restart) to ~0.5s (persistent), roughly doubling training SPS.
 
-## Path Cache (Static Board Optimization)
-
-When `enable_path_cache: true` (default), LongestPathFinder BFS results are cached and reused across turns and games within the same JVM. This avoids redundant path enumeration on static boards (fire disabled, terrain never changes).
-
-**How it works:** The BFS explores all reachable (hex, facing) states from a starting position within an MP budget. On a static board, this is deterministic for a given starting configuration. On first encounter, the BFS runs normally and results are stored as step-sequence descriptors (enum arrays). On subsequent encounters with the same key, step sequences are replayed into live MovePath objects, skipping the expensive BFS exploration.
-
-**Cache key:** `(startX, startY, startFacing, maxMP, walkMP, moveDirection, isProne)` — `maxMP` is `entity.getRunMP()` and `walkMP` is `entity.getWalkMP()`, both already accounting for damage and heat. These two values fully determine the walk/run movement type thresholds used in `MoveStep.compileIllegal()` for standard bipedal mechs. Stacking (opponent position) is handled by post-filtering since it only affects final destinations, not BFS exploration. Prone paths are excluded from caching (prone=true always runs fresh BFS) because GET_UP compilation depends on entity damage state beyond what walkMP/maxMP capture.
-
-**Scope:** The RL bot (`RLBotClient.enumerateLegalMoves()`) and Princess AI (`PathEnumerator.recalculateMovesForWorker()`) each get their own PathCache instance (not shared) to avoid cross-contamination between entities with different damage states. Both caches persist across game resets within the same JVM.
-
-**Config:** `enable_path_cache` in `MegaMekConfig` (default `true`). Passed as arg index 24 to RLGameRunner. Set to `false` if the board changes during games (e.g., fire enabled).
-
-**Stats:** Cache hit/miss rates are logged at game end: `PathCache: size=N hits=N misses=N hitRate=N%`. Hit rate improves across games as more starting positions are cached.
-
-**Limitations — what the path cache does NOT support:**
-- **Dynamic boards**: Fire, building collapse, or any terrain changes invalidate cached paths. Disable with `enable_path_cache: false`.
-- **Prone movement**: Excluded from caching. GET_UP step compilation depends on gyro/actuator damage state not captured in the cache key.
-- **MASC / Supercharger mechs**: `compileIllegal()` uses `getRunMPWithOneMASC()` and `getRunMPWithoutMASC()` thresholds which differ from `getRunMP()` when MASC is present. These are not in the cache key.
-- **Sprint-capable units**: Sprint MP thresholds (`getSprintMP()` and variants) are not in the cache key.
-- **LAMs / QuadVees / WiGE units**: These have movement mode transitions and alternate MP calculations in `compileIllegal()` that depend on entity state not captured in the key.
-- **Amphibious units**: `hasWorkingMisc(F_FULLY_AMPHIBIOUS)` affects run legality in water hexes and is not in the cache key.
-- **Jump paths**: Not cached (training uses non-jump mechs; uses `ShortestPathFinder` not `LongestPathFinder`).
-
-For V1 RL training with standard bipedal mechs (COM-2D, Trebuchet, etc.), none of these limitations apply. The cache key's `walkMP` + `maxMP` fully cover all `CachedEntityState` fields used during BFS step compilation.
-
 ## Known Pitfalls
 
 ### JVM shutdown race (terminal observation lost)
@@ -347,6 +323,20 @@ poetry run python mem_benchmark.py --megamek-dir ../megamek --env-counts 1,2 --e
 For each env count, starts N environments, runs a few episodes to stabilize memory, then measures per-JVM RSS (actual resident memory from `/proc`), JVM heap usage (from `[rl-mem]` log lines), and Python process RSS. Reports a summary table.
 
 The `mem_log` config field (default 0) controls Java-side memory logging verbosity: 0=off, 1=basic heap+delta, 2=pool breakdown, 3=class histogram. The benchmark enables level 1 automatically.
+
+## Memory Growth Tracking
+
+Use `mem_growth.py` to track how JVM memory grows over many games within a single JVM:
+
+```bash
+# Track memory over 30 games
+poetry run python mem_growth.py --megamek-dir ../megamek
+
+# Quick test
+poetry run python mem_growth.py --megamek-dir ../megamek --num-games 5 --verbose
+```
+
+Runs a single JVM through N games via persistent reset, capturing per-game RSS (from `/proc`) and JVM heap usage (from `[rl-mem]` log lines). Reports a time-series table and summary of memory growth.
 
 ## Move Distribution Analysis
 
