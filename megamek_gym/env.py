@@ -19,8 +19,11 @@ from gymnasium import spaces
 from megamek_gym.config import MegaMekConfig
 from megamek_gym.java_process import JavaProcess
 from megamek_gym.observation import (
+    _group_moves_by_destination,
     compute_obs_size,
+    compute_obs_size_hierarchical,
     flatten_observation,
+    flatten_observation_hierarchical,
     identify_rl_owner,
 )
 from megamek_gym.reward import CompositeReward, RewardFunction
@@ -48,15 +51,26 @@ class MegaMekEnv(gymnasium.Env):
 
         self.config = config
         self.reward_fn = reward_fn or CompositeReward()
+        self._hierarchical = config.action_space_type == "hierarchical"
 
-        obs_size = compute_obs_size(
-            config.resolved_board_width, config.resolved_board_height,
-            config.max_legal_moves,
-        )
+        if self._hierarchical:
+            obs_size = compute_obs_size_hierarchical(
+                config.resolved_board_width, config.resolved_board_height,
+                config.max_destinations,
+            )
+            self.action_space = spaces.MultiDiscrete(
+                [config.max_destinations, 6]
+            )
+        else:
+            obs_size = compute_obs_size(
+                config.resolved_board_width, config.resolved_board_height,
+                config.max_legal_moves,
+            )
+            self.action_space = spaces.Discrete(config.max_legal_moves)
+
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(obs_size,), dtype=np.float32
         )
-        self.action_space = spaces.Discrete(config.max_legal_moves)
 
         self._java: JavaProcess | None = None
         self._sock: socket.socket | None = None
@@ -65,6 +79,8 @@ class MegaMekEnv(gymnasium.Env):
         self._last_raw_obs: dict | None = None
         self._last_flat_obs: np.ndarray | None = None
         self._legal_moves: list = []
+        self._destinations: list = []
+        self._dest_facing_to_move_index: dict = {}
         self._reset_timing: dict | None = None
         self._java_crashed: bool = False
         self._reset_count: int = 0
@@ -290,12 +306,7 @@ class MegaMekEnv(gymnasium.Env):
 
         self._last_raw_obs = raw_obs
         self._legal_moves = raw_obs.get("legal_moves", [])
-        flat = flatten_observation(
-            raw_obs, self._rl_owner_id,
-            cfg.resolved_board_width, cfg.resolved_board_height,
-            legal_moves=self._legal_moves,
-            max_legal_moves=cfg.max_legal_moves,
-        )
+        flat = self._flatten_obs(raw_obs)
         self._last_flat_obs = flat
 
         info = self._build_info(raw_obs)
@@ -306,7 +317,18 @@ class MegaMekEnv(gymnasium.Env):
         if self._java_crashed:
             return self._handle_crash("Java already crashed, awaiting reset")
 
-        action_msg = json.dumps({"type": "action", "move_index": int(action)}) + "\n"
+        if self._hierarchical:
+            dest_idx, facing = int(action[0]), int(action[1])
+            move_index = self._dest_facing_to_move_index.get((dest_idx, facing))
+            if move_index is None:
+                logger.warning(
+                    "[port:%d] Invalid (dest=%d, facing=%d) — falling back to move 0",
+                    self._port, dest_idx, facing,
+                )
+                move_index = 0
+        else:
+            move_index = int(action)
+        action_msg = json.dumps({"type": "action", "move_index": move_index}) + "\n"
         try:
             self._sock.sendall(action_msg.encode("utf-8"))
         except (BrokenPipeError, ConnectionError, OSError) as e:
@@ -356,13 +378,7 @@ class MegaMekEnv(gymnasium.Env):
             # Terminal obs may have empty data — reuse last valid flat obs
             flat = self._last_flat_obs
         else:
-            flat = flatten_observation(
-                raw_obs, self._rl_owner_id,
-                self.config.resolved_board_width,
-                self.config.resolved_board_height,
-                legal_moves=self._legal_moves,
-                max_legal_moves=self.config.max_legal_moves,
-            )
+            flat = self._flatten_obs(raw_obs)
             self._last_flat_obs = flat
 
         info = self._build_info(raw_obs)
@@ -430,7 +446,10 @@ class MegaMekEnv(gymnasium.Env):
                 game_outcome = -1
 
         n_legal = len(self._legal_moves)
-        moves_truncated = max(0, n_legal - self.config.max_legal_moves)
+        if self._hierarchical:
+            moves_truncated = max(0, len(self._destinations) - self.config.max_destinations)
+        else:
+            moves_truncated = max(0, n_legal - self.config.max_legal_moves)
 
         info = {
             "action_mask": self.action_masks(),
@@ -446,12 +465,53 @@ class MegaMekEnv(gymnasium.Env):
         }
         return info
 
-    def action_masks(self) -> np.ndarray:
+    def _flatten_obs(self, raw_obs: dict) -> np.ndarray:
+        """Flatten observation using the appropriate mode (flat or hierarchical)."""
+        cfg = self.config
+        if self._hierarchical:
+            # Update destination grouping from current legal moves
+            rl_unit = None
+            for u in raw_obs.get("units", []):
+                if u.get("owner") == self._rl_owner_id:
+                    rl_unit = u
+                    break
+            walk_mp = rl_unit.get("mp_walk", 0) if rl_unit else 0
+            self._destinations, self._dest_facing_to_move_index = \
+                _group_moves_by_destination(self._legal_moves, walk_mp)
+            return flatten_observation_hierarchical(
+                raw_obs, self._rl_owner_id,
+                cfg.resolved_board_width, cfg.resolved_board_height,
+                legal_moves=self._legal_moves,
+                max_destinations=cfg.max_destinations,
+            )
+        else:
+            return flatten_observation(
+                raw_obs, self._rl_owner_id,
+                cfg.resolved_board_width, cfg.resolved_board_height,
+                legal_moves=self._legal_moves,
+                max_legal_moves=cfg.max_legal_moves,
+            )
+
+    def action_masks(self):
+        if self._hierarchical:
+            return self._action_masks_hierarchical()
         mask = np.zeros(self.config.max_legal_moves, dtype=bool)
         n = min(len(self._legal_moves), self.config.max_legal_moves)
         if n > 0:
             mask[:n] = True
         return mask
+
+    def _action_masks_hierarchical(self) -> dict:
+        """Return dest_mask and facing_mask for hierarchical action space."""
+        max_dest = self.config.max_destinations
+        dest_mask = np.zeros(max_dest, dtype=bool)
+        facing_mask = np.zeros((max_dest, 6), dtype=bool)
+        n = min(len(self._destinations), max_dest)
+        for i in range(n):
+            dest_mask[i] = True
+            for facing in self._destinations[i]["facing_options"]:
+                facing_mask[i, facing] = True
+        return {"dest_mask": dest_mask, "facing_mask": facing_mask}
 
     def close(self):
         self._cleanup()

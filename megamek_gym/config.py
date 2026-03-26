@@ -74,6 +74,8 @@ class MegaMekConfig:
     target_kl: float = 0.03
     hidden_size: int = 512
     save_interval: int = 50
+    action_space_type: str = "flat"    # "flat" or "hierarchical"
+    max_destinations: int = 100        # cap for destination list in hierarchical mode
 
     def __post_init__(self):
         # YAML deserializes [x, y] as list; convert to tuple

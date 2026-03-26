@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import gymnasium as gym
 
-from megamek_gym.agent import Agent, load_agent, select_action, OUTCOME_MAP
+from megamek_gym.agent import Agent, HierarchicalAgent, load_agent, load_hierarchical_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
 
 
@@ -33,6 +33,51 @@ def parse_args():
     return args
 
 
+def _select_hierarchical(agent, obs, action_mask, device, deterministic, is_random):
+    """Select a (dest, facing) action for hierarchical action space.
+
+    Returns a numpy array [dest_idx, facing].
+    """
+    dest_mask = action_mask["dest_mask"]
+    facing_mask = action_mask["facing_mask"]
+
+    if is_random:
+        valid_dests = np.where(dest_mask)[0]
+        dest = np.random.choice(valid_dests) if len(valid_dests) > 0 else 0
+        valid_facings = np.where(facing_mask[dest])[0]
+        facing = np.random.choice(valid_facings) if len(valid_facings) > 0 else 0
+        return np.array([dest, facing])
+
+    obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
+    dm_t = torch.tensor(dest_mask, dtype=torch.bool).unsqueeze(0).to(device)
+    fm_t = torch.tensor(facing_mask, dtype=torch.bool).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        if deterministic:
+            from megamek_gym.observation import DEST_FEATURES
+
+            features = agent.feature_net(obs_t)
+            dest_logits = agent.dest_head(features)
+            dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
+            dest = dest_logits.argmax(dim=1)
+
+            # Gather dest features from obs for facing head
+            off = agent.dest_block_offset
+            dest_start = off + dest * DEST_FEATURES
+            idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES, device=obs_t.device)
+            dest_feats = obs_t.gather(1, idx)
+            facing_input = torch.cat([features, dest_feats], dim=-1)
+            facing_logits = agent.facing_head(facing_input)
+            batch_fm = fm_t[torch.arange(1), dest]
+            facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
+            facing = facing_logits.argmax(dim=1)
+
+            return np.array([dest.item(), facing.item()])
+        else:
+            action, _, _, _ = agent.get_action_and_value(obs_t, dm_t, fm_t)
+            return action[0].cpu().numpy()
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -50,17 +95,22 @@ if __name__ == "__main__":
     env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
 
     obs_size = env.observation_space.shape[0]
-    action_size = env.action_space.n
+    hierarchical = cfg.action_space_type == "hierarchical"
 
     if args.random:
         agent = None
         print(f"Random baseline (uniform over legal moves)")
         print(f"  num_episodes={args.num_episodes}")
     else:
-        agent, checkpoint, device = load_agent(args.checkpoint, obs_size, action_size, device=device)
+        if hierarchical:
+            agent, checkpoint, device = load_hierarchical_agent(
+                args.checkpoint, obs_size, cfg.max_destinations, device)
+        else:
+            agent, checkpoint, device = load_agent(
+                args.checkpoint, obs_size, env.action_space.n, device)
         print(f"Loaded checkpoint: {args.checkpoint}")
         print(f"  global_step={checkpoint.get('global_step', '?')}, update={checkpoint.get('update', '?')}")
-        print(f"  obs_size={obs_size}, action_size={action_size}")
+        print(f"  obs_size={obs_size}, hierarchical={hierarchical}")
         print(f"  deterministic={args.deterministic}, num_episodes={args.num_episodes}")
     print()
 
@@ -76,7 +126,12 @@ if __name__ == "__main__":
         episode_length = 0
 
         while not done:
-            if args.random:
+            if hierarchical:
+                action = _select_hierarchical(
+                    agent, obs, info["action_mask"], device,
+                    args.deterministic, args.random,
+                )
+            elif args.random:
                 n_legal = info.get("n_legal_moves", 0)
                 action = np.random.randint(0, max(n_legal, 1))
             else:

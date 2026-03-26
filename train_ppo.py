@@ -17,7 +17,7 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
-from megamek_gym.agent import Agent
+from megamek_gym.agent import Agent, HierarchicalAgent
 from megamek_gym.config import MegaMekConfig
 
 
@@ -185,7 +185,13 @@ if __name__ == "__main__":
 
     try:  # try/finally to guarantee envs.close() on any exception
 
-        agent = Agent(envs.single_observation_space.shape[0], envs.single_action_space.n, hidden_size=cfg.hidden_size).to(device)
+        hierarchical = cfg.action_space_type == "hierarchical"
+        obs_size = envs.single_observation_space.shape[0]
+
+        if hierarchical:
+            agent = HierarchicalAgent(obs_size, cfg.max_destinations, hidden_size=cfg.hidden_size).to(device)
+        else:
+            agent = Agent(obs_size, envs.single_action_space.n, hidden_size=cfg.hidden_size).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
         if checkpoint is not None:
@@ -213,12 +219,18 @@ if __name__ == "__main__":
 
         # Initialize Rollout
         obs_buf = torch.zeros((cfg.num_steps, cfg.num_envs) + envs.single_observation_space.shape).to(device)
-        actions_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
         logprobs_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
         rewards_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
         dones_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
         values_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
-        masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, envs.single_action_space.n), dtype=torch.bool).to(device)
+
+        if hierarchical:
+            actions_buf = torch.zeros((cfg.num_steps, cfg.num_envs, 2), dtype=torch.long).to(device)
+            dest_masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, cfg.max_destinations), dtype=torch.bool).to(device)
+            facing_masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, cfg.max_destinations, 6), dtype=torch.bool).to(device)
+        else:
+            actions_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
+            masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, envs.single_action_space.n), dtype=torch.bool).to(device)
 
         # Start
         start_time = time.time()
@@ -244,14 +256,21 @@ if __name__ == "__main__":
 
         next_obs = torch.Tensor(next_obs).to(device)
         next_done = torch.zeros(cfg.num_envs).to(device)
-        next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
+        if hierarchical:
+            next_dest_mask = torch.tensor(np.array(info["action_mask"]["dest_mask"])).to(device)
+            next_facing_mask = torch.tensor(np.array(info["action_mask"]["facing_mask"])).to(device)
+        else:
+            next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
         num_updates = cfg.total_timesteps // batch_size
 
         print(f"\n{'='*60}")
         print(f"  PPO Training — {cfg.exp_name}")
         print(f"  Device: {device} | Envs: {cfg.num_envs} | Stagger: {cfg.stagger_delay}s")
         n_params = sum(p.numel() for p in agent.parameters())
-        print(f"  Obs: {envs.single_observation_space.shape[0]} | Actions: {envs.single_action_space.n} | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
+        if hierarchical:
+            print(f"  Obs: {obs_size} | Action: MultiDiscrete([{cfg.max_destinations}, 6]) | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
+        else:
+            print(f"  Obs: {obs_size} | Actions: {envs.single_action_space.n} | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
         print(f"  Timesteps: {cfg.total_timesteps:,} | Updates: {num_updates}")
         print(f"  Batch: {batch_size} | Minibatch: {minibatch_size}")
         print(f"  LR: {cfg.learning_rate} | Ent: {cfg.ent_coef} | Gamma: {cfg.gamma}")
@@ -286,21 +305,42 @@ if __name__ == "__main__":
                 global_step += cfg.num_envs
                 obs_buf[step] = next_obs
                 dones_buf[step] = next_done
-                masks_buf[step] = next_mask
 
-                with torch.no_grad():
-                    action, logprob, _, value = agent.get_action_and_value(next_obs, next_mask)
-                    values_buf[step] = value.flatten()
+                if hierarchical:
+                    dest_masks_buf[step] = next_dest_mask
+                    facing_masks_buf[step] = next_facing_mask
 
-                actions_buf[step] = action
-                logprobs_buf[step] = logprob
+                    with torch.no_grad():
+                        action, logprob, _, value = agent.get_action_and_value(
+                            next_obs, next_dest_mask, next_facing_mask)
+                        values_buf[step] = value.flatten()
 
-                next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
-                done = np.logical_or(terminated, truncated)
-                rewards_buf[step] = torch.tensor(reward).to(device)
-                next_obs = torch.Tensor(next_obs).to(device)
-                next_done = torch.Tensor(done).to(device)
-                next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
+                    actions_buf[step] = action
+                    logprobs_buf[step] = logprob
+
+                    next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
+                    done = np.logical_or(terminated, truncated)
+                    rewards_buf[step] = torch.tensor(reward).to(device)
+                    next_obs = torch.Tensor(next_obs).to(device)
+                    next_done = torch.Tensor(done).to(device)
+                    next_dest_mask = torch.tensor(np.array(info["action_mask"]["dest_mask"])).to(device)
+                    next_facing_mask = torch.tensor(np.array(info["action_mask"]["facing_mask"])).to(device)
+                else:
+                    masks_buf[step] = next_mask
+
+                    with torch.no_grad():
+                        action, logprob, _, value = agent.get_action_and_value(next_obs, next_mask)
+                        values_buf[step] = value.flatten()
+
+                    actions_buf[step] = action
+                    logprobs_buf[step] = logprob
+
+                    next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
+                    done = np.logical_or(terminated, truncated)
+                    rewards_buf[step] = torch.tensor(reward).to(device)
+                    next_obs = torch.Tensor(next_obs).to(device)
+                    next_done = torch.Tensor(done).to(device)
+                    next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
                 rollout_n_legal.extend(info["n_legal_moves"])
 
                 # Track move truncation
@@ -383,11 +423,17 @@ if __name__ == "__main__":
 
             b_obs = obs_buf.reshape((-1,) + envs.single_observation_space.shape)
             b_logprobs = logprobs_buf.reshape(-1)
-            b_actions = actions_buf.reshape(-1)
             b_advantages = advantages.reshape(-1)
             b_returns = returns.reshape(-1)
             b_values = values_buf.reshape(-1)
-            b_masks = masks_buf.reshape((-1, envs.single_action_space.n))
+
+            if hierarchical:
+                b_actions = actions_buf.reshape(-1, 2)
+                b_dest_masks = dest_masks_buf.reshape(-1, cfg.max_destinations)
+                b_facing_masks = facing_masks_buf.reshape(-1, cfg.max_destinations, 6)
+            else:
+                b_actions = actions_buf.reshape(-1)
+                b_masks = masks_buf.reshape((-1, envs.single_action_space.n))
 
             # Training
             b_inds = np.arange(batch_size)
@@ -397,7 +443,12 @@ if __name__ == "__main__":
                 for start in range(0, batch_size, minibatch_size):
                     end = start + minibatch_size
                     mb_inds = b_inds[start:end]
-                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_masks[mb_inds], b_actions.long()[mb_inds])
+                    if hierarchical:
+                        _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                            b_obs[mb_inds], b_dest_masks[mb_inds], b_facing_masks[mb_inds],
+                            b_actions[mb_inds])
+                    else:
+                        _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_masks[mb_inds], b_actions.long()[mb_inds])
                     logratio = newlogprob - b_logprobs[mb_inds]
                     ratio = logratio.exp()
 
@@ -556,9 +607,14 @@ if __name__ == "__main__":
         if total_moves_truncated_steps > 0:
             total_steps = global_step - resume_step_offset
             trunc_pct = total_moves_truncated_steps / max(total_steps, 1) * 100
-            print(f"\n  WARNING: Legal moves exceeded max_legal_moves ({cfg.max_legal_moves}) on {total_moves_truncated_steps} steps ({trunc_pct:.2f}%).")
-            print(f"           {total_moves_truncated_count} total moves were dropped (invisible to agent).")
-            print(f"           Consider increasing max_legal_moves in your config.")
+            if hierarchical:
+                print(f"\n  WARNING: Destinations exceeded max_destinations ({cfg.max_destinations}) on {total_moves_truncated_steps} steps ({trunc_pct:.2f}%).")
+                print(f"           {total_moves_truncated_count} total destinations were dropped (invisible to agent).")
+                print(f"           Consider increasing max_destinations in your config.")
+            else:
+                print(f"\n  WARNING: Legal moves exceeded max_legal_moves ({cfg.max_legal_moves}) on {total_moves_truncated_steps} steps ({trunc_pct:.2f}%).")
+                print(f"           {total_moves_truncated_count} total moves were dropped (invisible to agent).")
+                print(f"           Consider increasing max_legal_moves in your config.")
         print(f"\n{'='*60}")
         print(f"  Run directory:  runs/{run_name}")
         print(f"  Latest checkpoint: runs/{run_name}/checkpoints/latest.pt")

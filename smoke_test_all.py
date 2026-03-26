@@ -31,7 +31,7 @@ import numpy as np
 import megamek_gym  # noqa: F401 — registers MegaMekGym/MegaMek-v0
 from megamek_gym.config import MegaMekConfig
 from megamek_gym.observation import (
-    compute_obs_size, format_observation,
+    compute_obs_size, compute_obs_size_hierarchical, format_observation,
     MOVE_FEATURES, MOVE_FEATURE_NAMES, UNIT_FEATURES, GLOBAL_FEATURES,
 )
 from tests.test_cross_validation import validate_observation
@@ -93,25 +93,41 @@ def read_peak_memory(megamek_dir, port):
     return None
 
 
+def _random_action(info, hierarchical=False):
+    """Pick a random valid action from the info dict."""
+    if hierarchical:
+        mask = info["action_mask"]
+        dest_mask = mask["dest_mask"]
+        facing_mask = mask["facing_mask"]
+        valid_dests = np.where(dest_mask)[0]
+        dest = np.random.choice(valid_dests) if len(valid_dests) > 0 else 0
+        valid_facings = np.where(facing_mask[dest])[0]
+        facing = np.random.choice(valid_facings) if len(valid_facings) > 0 else 0
+        return np.array([dest, facing])
+    else:
+        n_legal = info.get("n_legal_moves", 0)
+        return np.random.randint(0, max(n_legal, 1))
+
+
 def run_episode(env, max_steps=500, action_fn=None, verbose=False):
     """Run one episode. Returns (steps, terminated, truncated, final_info, obs_shape)."""
     obs, info = env.reset()
     obs_shape = obs.shape
     n_legal = info.get("n_legal_moves", 0)
+    hierarchical = env.unwrapped._hierarchical
 
     if verbose:
         print(f"    Reset complete. Obs shape: {obs_shape}, legal moves: {n_legal}")
         inner = env.unwrapped
         if inner._last_raw_obs:
-            print(format_observation(inner._last_raw_obs, inner._rl_owner_id))
+            print(format_observation(inner._last_raw_obs, inner._rl_owner_id, hierarchical=hierarchical))
 
     step = 0
     while True:
         if action_fn is not None:
             action = action_fn(info)
         else:
-            n_legal = info.get("n_legal_moves", 0)
-            action = np.random.randint(0, max(n_legal, 1))
+            action = _random_action(info, hierarchical)
 
         obs, reward, terminated, truncated, info = env.step(action)
         step += 1
@@ -127,7 +143,7 @@ def run_episode(env, max_steps=500, action_fn=None, verbose=False):
             if verbose:
                 inner = env.unwrapped
                 if inner._last_raw_obs:
-                    print(format_observation(inner._last_raw_obs, inner._rl_owner_id))
+                    print(format_observation(inner._last_raw_obs, inner._rl_owner_id, hierarchical=hierarchical))
             return step, terminated, truncated, info, obs_shape
 
         if step >= max_steps:
@@ -151,7 +167,10 @@ def test_basic_episode(megamek_dir, port, verbose):
 
         bw = config.resolved_board_width
         bh = config.resolved_board_height
-        expected_size = compute_obs_size(bw, bh, config.max_legal_moves)
+        if config.action_space_type == "hierarchical":
+            expected_size = compute_obs_size_hierarchical(bw, bh, config.max_destinations)
+        else:
+            expected_size = compute_obs_size(bw, bh, config.max_legal_moves)
         if obs_shape != (expected_size,):
             return False, f"obs shape {obs_shape} != expected ({expected_size},)"
 
@@ -248,8 +267,7 @@ def test_cross_validation(megamek_dir, port, verbose):
                         for m in mismatches:
                             print(f"    MISMATCH: {m}")
 
-            n_legal = info.get("n_legal_moves", 0)
-            action = np.random.randint(0, max(n_legal, 1))
+            action = _random_action(info, inner._hierarchical)
             obs, reward, terminated, truncated, info = env.step(action)
             step += 1
 
@@ -331,7 +349,7 @@ def test_auto_wake_pilot(megamek_dir, port, verbose):
                         "(expected > 1 after waking pilot)"
                     )
 
-            action = np.random.randint(0, max(n_legal, 1))
+            action = _random_action(info, env.unwrapped._hierarchical)
             obs, reward, terminated, truncated, info = env.step(action)
             step += 1
 
@@ -564,9 +582,70 @@ def test_pilot_stats(megamek_dir, port, verbose):
         env.close()
 
 
+def test_hierarchical_action_space(megamek_dir, port, verbose):
+    """Hierarchical action space: reset + random steps with dest/facing masks."""
+    config = base_config(megamek_dir, port,
+                         action_space_type="hierarchical",
+                         max_destinations=100,
+                         max_game_rounds=10)
+
+    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
+    try:
+        obs, info = env.reset()
+
+        # Check obs shape
+        bw = config.resolved_board_width
+        bh = config.resolved_board_height
+        expected_size = compute_obs_size_hierarchical(bw, bh, config.max_destinations)
+        if obs.shape != (expected_size,):
+            return False, f"obs shape {obs.shape} != expected ({expected_size},)"
+
+        # Check action_mask structure
+        mask = info["action_mask"]
+        if not isinstance(mask, dict):
+            return False, f"Expected action_mask dict, got {type(mask).__name__}"
+        if "dest_mask" not in mask or "facing_mask" not in mask:
+            return False, f"Missing mask keys: {list(mask.keys())}"
+        if mask["dest_mask"].shape != (config.max_destinations,):
+            return False, f"dest_mask shape {mask['dest_mask'].shape} != ({config.max_destinations},)"
+        if mask["facing_mask"].shape != (config.max_destinations, 6):
+            return False, f"facing_mask shape {mask['facing_mask'].shape} != ({config.max_destinations}, 6)"
+
+        n_valid_dests = int(mask["dest_mask"].sum())
+        if n_valid_dests == 0:
+            return False, "No valid destinations after reset"
+
+        # Run a few random steps
+        steps_taken = 0
+        while True:
+            action = _random_action(info, hierarchical=True)
+            obs, reward, terminated, truncated, info = env.step(action)
+            steps_taken += 1
+
+            if verbose and steps_taken <= 5:
+                n_dests = int(info["action_mask"]["dest_mask"].sum()) if not (terminated or truncated) else 0
+                print(f"    Step {steps_taken}: action={action}, reward={reward:+.3f}, "
+                      f"dests={n_dests}")
+
+            if terminated or truncated:
+                break
+            if steps_taken >= 200:
+                break
+
+        outcome = info.get("game_outcome", 0)
+        return True, (
+            f"{steps_taken} steps, {n_valid_dests} initial dests, "
+            f"game_outcome={outcome}"
+        )
+    finally:
+        env.close()
+
+
 def test_feature_distributions(megamek_dir, port, verbose):
     """Feature distributions: per-move features must vary between legal moves."""
     config = base_config(megamek_dir, port, max_game_rounds=50)
+    if config.action_space_type == "hierarchical":
+        return True, "Skipped (flat-only test, action_space_type=hierarchical)"
     env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
 
     board_w = config.resolved_board_width
@@ -656,6 +735,7 @@ TESTS = [
     ("Board Consistency", test_board_consistency, 7),
     ("Pilot Stats", test_pilot_stats, 8),
     ("Feature Distributions", test_feature_distributions, 9),
+    ("Hierarchical Action Space", test_hierarchical_action_space, 10),
 ]
 
 

@@ -6,10 +6,17 @@ import numpy as np
 
 from megamek_gym.reward import cover_value, hex_distance, range_quality
 
+# Board elevation grid — disabled for MLP (spatial grid is hard for MLPs to use;
+# per-dest elevation_diff already captures the decision-relevant signal).
+# Re-enable for CNN architecture by setting to True.
+INCLUDE_BOARD_ELEVATION = False
+
 BOARD_WIDTH = 16
 BOARD_HEIGHT = 17
-BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT  # 272
+BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT if INCLUDE_BOARD_ELEVATION else 0
 UNIT_FEATURES = 55
+DEST_FEATURES = 9 # Multi-Discrete Mode
+FACING_FEATURES = 1 # Multi-Discrete Mode
 GLOBAL_FEATURES = 1  # rl_moves_first
 MOVE_FEATURE_NAMES = [
     "dest_x", "dest_y", "facing", "mp_used",
@@ -20,13 +27,27 @@ MOVE_FEATURES = len(MOVE_FEATURE_NAMES)
 OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES  # 383 (without move features)
 
 
+def _board_block_size(board_width: int, board_height: int) -> int:
+    """Size of the board elevation block (0 when INCLUDE_BOARD_ELEVATION is False)."""
+    return board_width * board_height if INCLUDE_BOARD_ELEVATION else 0
+
+
 def compute_obs_size(board_width: int, board_height: int, max_legal_moves: int = 0) -> int:
     """Compute observation vector size for a given board.
 
     When max_legal_moves > 0, includes a block of move features
     (max_legal_moves * MOVE_FEATURES) appended after the unit features.
     """
-    return board_width * board_height + 2 * UNIT_FEATURES + GLOBAL_FEATURES + max_legal_moves * MOVE_FEATURES
+    return _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES + max_legal_moves * MOVE_FEATURES
+
+
+def compute_obs_size_hierarchical(board_width: int, board_height: int, max_destinations: int) -> int:
+    """Compute observation vector size for hierarchical (dest + facing) action space.
+
+    Layout: [board elevations] + 2 units + global + dest features + facing features.
+    """
+    base = _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+    return base + max_destinations * DEST_FEATURES + max_destinations * 6 * FACING_FEATURES
 
 MAX_ARMOR_LOCATIONS = 8
 MAX_WEAPONS = 7
@@ -48,14 +69,17 @@ def flatten_observation(
     obs_size = compute_obs_size(board_width, board_height, max_legal_moves)
     result = np.zeros(obs_size, dtype=np.float32)
 
-    # Board block: elevation per hex, row-major, normalized by /10
     board = obs.get("board", {})
-    hexes = board.get("hexes", [])
-    for h in hexes:
-        x, y = h["x"], h["y"]
-        if 0 <= x < board_width and 0 <= y < board_height:
-            idx = y * board_width + x
-            result[idx] = h.get("elevation", 0) / 10.0
+
+    # Board block: elevation per hex, row-major, normalized by /10
+    # (disabled when INCLUDE_BOARD_ELEVATION is False — see module docstring)
+    if INCLUDE_BOARD_ELEVATION:
+        hexes = board.get("hexes", [])
+        for h in hexes:
+            x, y = h["x"], h["y"]
+            if 0 <= x < board_width and 0 <= y < board_height:
+                idx = y * board_width + x
+                result[idx] = h.get("elevation", 0) / 10.0
 
     # Split units into RL vs enemy
     units = obs.get("units", [])
@@ -68,7 +92,7 @@ def flatten_observation(
             enemy_unit = u
 
     # Encode units
-    offset = BOARD_SIZE
+    offset = _board_block_size(board_width, board_height)
     if rl_unit is not None:
         _encode_unit(result, offset, rl_unit, board_width, board_height)
     offset += UNIT_FEATURES
@@ -89,6 +113,165 @@ def flatten_observation(
         )
 
     return result
+
+
+def flatten_observation_hierarchical(
+    obs: dict,
+    rl_owner_id: int,
+    board_width: int = BOARD_WIDTH,
+    board_height: int = BOARD_HEIGHT,
+    legal_moves: list | None = None,
+    max_destinations: int = 100,
+) -> np.ndarray:
+    """Flatten observation for hierarchical (dest + facing) action space.
+
+    Layout: [board elevations] | RL unit | enemy unit | global |
+            per-dest features (max_dest * 9) | per-dest facing features (max_dest * 6 * 1)
+    """
+    obs_size = compute_obs_size_hierarchical(board_width, board_height, max_destinations)
+    result = np.zeros(obs_size, dtype=np.float32)
+
+    board = obs.get("board", {})
+
+    # Board block (same as flat, disabled when INCLUDE_BOARD_ELEVATION is False)
+    if INCLUDE_BOARD_ELEVATION:
+        hexes = board.get("hexes", [])
+        for h in hexes:
+            x, y = h["x"], h["y"]
+            if 0 <= x < board_width and 0 <= y < board_height:
+                idx = y * board_width + x
+                result[idx] = h.get("elevation", 0) / 10.0
+
+    # Split units
+    units = obs.get("units", [])
+    rl_unit = None
+    enemy_unit = None
+    for u in units:
+        if u["owner"] == rl_owner_id:
+            rl_unit = u
+        else:
+            enemy_unit = u
+
+    # Encode units (same as flat)
+    offset = _board_block_size(board_width, board_height)
+    if rl_unit is not None:
+        _encode_unit(result, offset, rl_unit, board_width, board_height)
+    offset += UNIT_FEATURES
+    if enemy_unit is not None:
+        _encode_unit(result, offset, enemy_unit, board_width, board_height)
+    offset += UNIT_FEATURES
+
+    # Global features (same as flat)
+    result[offset] = float(obs.get("rl_moves_first", False))
+    offset += GLOBAL_FEATURES
+
+    # Destination + facing feature blocks
+    if legal_moves:
+        board_hexes = board.get("hexes", [])
+        walk_mp = rl_unit.get("mp_walk", 0) if rl_unit else 0
+        _flatten_dest_features(
+            result, offset, legal_moves, max_destinations, board_width, board_height,
+            walk_mp=walk_mp, rl_unit=rl_unit, enemy_unit=enemy_unit, board_hexes=board_hexes,
+        )
+
+    return result
+
+
+def _flatten_dest_features(
+    buf: np.ndarray,
+    offset: int,
+    legal_moves: list,
+    max_destinations: int,
+    board_width: int,
+    board_height: int,
+    walk_mp: int,
+    rl_unit: dict | None = None,
+    enemy_unit: dict | None = None,
+    board_hexes: list | None = None,
+) -> None:
+    """Write per-destination and per-facing features into the buffer.
+
+    Dest block: buf[offset : offset + max_destinations * DEST_FEATURES]
+    Facing block: buf[facing_offset : facing_offset + max_destinations * 6 * FACING_FEATURES]
+    """
+    # Pre-compute enemy info and elevation lookup
+    has_enemy = (enemy_unit is not None
+                 and enemy_unit.get("x", -1) >= 0
+                 and enemy_unit.get("y", -1) >= 0)
+    if has_enemy:
+        ex, ey = enemy_unit["x"], enemy_unit["y"]
+        enemy_facing = enemy_unit.get("facing")
+    else:
+        ex = ey = enemy_facing = None
+
+    max_dim = max(board_width, board_height)
+    elev_map: dict[tuple[int, int], float] = {}
+    if board_hexes:
+        for h in board_hexes:
+            elev_map[(h["x"], h["y"])] = h.get("elevation", 0)
+    enemy_elev = elev_map.get((ex, ey), 0) if has_enemy else 0
+
+    # Group moves into destinations
+    destinations, _ = _group_moves_by_destination(legal_moves, walk_mp)
+    n_dest = min(len(destinations), max_destinations)
+
+    facing_offset = offset + max_destinations * DEST_FEATURES
+
+    for i in range(n_dest):
+        dest = destinations[i]
+        dest_x = dest["dest_x"]
+        dest_y = dest["dest_y"]
+
+        # --- Per-destination features (9) ---
+        base = offset + i * DEST_FEATURES
+        buf[base] = dest_x / board_width
+        buf[base + 1] = dest_y / board_height
+        buf[base + 2] = dest["mp_used"] / 20.0
+
+        best_rl_rq = 0.0
+
+        if has_enemy:
+            dist = hex_distance(dest_x, dest_y, ex, ey)
+            buf[base + 3] = dist / max_dim
+
+            # Terrain cover at destination
+            if board_hexes:
+                buf[base + 4] = cover_value(board_hexes, dest_x, dest_y) / 2.0
+
+            # Elevation advantage
+            dest_elev = elev_map.get((dest_x, dest_y), 0)
+            buf[base + 5] = (dest_elev - enemy_elev) / 10.0
+
+            # has_los — pick from any move in this destination group
+            any_move_idx = next(iter(dest["facing_options"].values()))
+            buf[base + 6] = float(legal_moves[any_move_idx].get("has_los", False))
+
+            # Enemy range quality (facing-independent — depends on enemy's facing, not ours)
+            buf[base + 7] = range_quality(
+                enemy_unit, dist,
+                target_x=dest_x, target_y=dest_y,
+                unit_x=ex, unit_y=ey,
+                unit_facing=enemy_facing,
+            )
+
+        # --- Per-facing features (6 facings × 1: rl_range_quality only) ---
+        for facing, move_idx in dest["facing_options"].items():
+            f_base = facing_offset + i * 6 * FACING_FEATURES + facing * FACING_FEATURES
+
+            if has_enemy:
+                # RL weapon effectiveness at this facing (arc-dependent)
+                rl_rq = range_quality(
+                    rl_unit, dist,
+                    target_x=ex, target_y=ey,
+                    unit_x=dest_x, unit_y=dest_y,
+                    unit_facing=facing,
+                ) if rl_unit else 0.0
+                buf[f_base] = rl_rq
+                if rl_rq > best_rl_rq:
+                    best_rl_rq = rl_rq
+
+        # Best RL range quality across all available facings
+        buf[base + 8] = best_rl_rq
 
 
 def _flatten_move_features(
@@ -252,12 +435,38 @@ def identify_rl_owner(obs: dict, active_entity_id: int) -> int:
 _FACING_NAMES = ["N", "NE", "SE", "S", "SW", "NW"]
 
 
-def format_observation(obs: dict, rl_owner_id: int | None = None) -> str:
+def _group_moves_by_destination(legal_moves, walk_mp):
+    
+    # (x_coord, y_coord, mp_used): {facing: original_index}
+    grouping_dict = {}
+    for move in legal_moves:
+        index = move["index"]
+        facing = move["facing"]
+        is_run = move["mp_used"] > walk_mp
+        dest_idx = (move["dest_x"], move["dest_y"], is_run)
+        if dest_idx in grouping_dict:
+            grouping_dict[dest_idx]["facing_options"][facing] = index
+            grouping_dict[dest_idx]["mp_used"] = min(grouping_dict[dest_idx]["mp_used"], move["mp_used"])
+        else:
+            features = {k:v for k, v in move.items() if k in ["dest_x", "dest_y", "mp_used"]}
+            features["facing_options"] = {facing: index}
+            grouping_dict[dest_idx] = features
+
+    grouped_destinations = list(grouping_dict.values())
+    lookup = {}
+    for i, grouping in enumerate(grouped_destinations):
+        for facing, move_idx in grouping["facing_options"].items():
+            lookup[(i, facing)] = move_idx
+    return grouped_destinations, lookup
+
+
+def format_observation(obs: dict, rl_owner_id: int | None = None, hierarchical: bool = False) -> str:
     """Format a JSON observation dict as a readable multi-line string.
 
     Args:
         obs: Raw observation dict from the Java bridge.
         rl_owner_id: RL player's owner ID. If None, inferred from active_entity_id.
+        hierarchical: If True, group legal moves by destination (hex + walk/run).
 
     Returns:
         Human-readable multi-line string.
@@ -396,79 +605,114 @@ def format_observation(obs: dict, rl_owner_id: int | None = None) -> str:
     lines.append("")
     if not moves:
         lines.append("--- LEGAL MOVES (0) ---")
+    elif hierarchical and moves and "mp_used" in moves[0]:
+        _format_moves_hierarchical(lines, moves, rl_owner_id, obs.get("units", []))
     else:
-        is_deployment = "elevation" in moves[0] and "mp_used" not in moves[0]
-
-        if is_deployment:
-            lines.append(f"--- DEPLOYMENT MOVES ({len(moves)} total) ---")
-            # Show first 5
-            for m in moves[:5]:
-                idx = m.get("index", "?")
-                dx, dy = m.get("dest_x", "?"), m.get("dest_y", "?")
-                f = m.get("facing", 0)
-                fn = _FACING_NAMES[f] if 0 <= f < 6 else str(f)
-                elev = m.get("elevation", 0)
-                lines.append(f"  #{idx}: ({dx},{dy}) facing {fn}, elev={elev}")
-            if len(moves) > 5:
-                lines.append(f"  ... and {len(moves) - 5} more")
-        else:
-            # Movement moves - compute summary stats
-            mp_vals = [m.get("mp_used", 0) for m in moves]
-            xs = [m["dest_x"] for m in moves if m.get("dest_x", -1) >= 0]
-            ys = [m["dest_y"] for m in moves if m.get("dest_y", -1) >= 0]
-            n_jumping = sum(1 for m in moves if m.get("jumping"))
-            n_prone = sum(1 for m in moves if m.get("prone"))
-
-            mp_lo, mp_hi = min(mp_vals), max(mp_vals)
-            summary_parts = [f"MP range: {mp_lo}-{mp_hi}"]
-            if xs:
-                summary_parts.append(f"Dest x=[{min(xs)}..{max(xs)}], y=[{min(ys)}..{max(ys)}]")
-            if n_jumping:
-                summary_parts.append(f"Jumping: {n_jumping}")
-            if n_prone:
-                summary_parts.append(f"Prone: {n_prone}")
-
-            lines.append(f"--- LEGAL MOVES ({len(moves)} total) ---")
-            lines.append(" | ".join(summary_parts))
-
-            # Sample moves: first, a couple short, closest to enemy
-            sample_indices: list[int] = [0]  # always show first
-            # Add index 1 and 2 if they exist and aren't index 0
-            for si in [1, 2]:
-                if si < len(moves) and si not in sample_indices:
-                    sample_indices.append(si)
-            # A mid-range move
-            mid = len(moves) // 2
-            if mid not in sample_indices and mid < len(moves):
-                sample_indices.append(mid)
-            # Closest to enemy (by java_dist_to_enemy)
-            closest_idx = None
-            closest_dist = float("inf")
-            for i, m in enumerate(moves):
-                d = m.get("java_dist_to_enemy", -1)
-                if d >= 0 and d < closest_dist:
-                    closest_dist = d
-                    closest_idx = i
-            if closest_idx is not None and closest_idx not in sample_indices:
-                sample_indices.append(closest_idx)
-
-            lines.append("Sample moves:")
-            for i in sample_indices:
-                m = moves[i]
-                idx = m.get("index", i)
-                dx, dy = m.get("dest_x", -1), m.get("dest_y", -1)
-                f = m.get("facing", 0)
-                fn = _FACING_NAMES[f] if 0 <= f < 6 else str(f)
-                mp = m.get("mp_used", 0)
-                tags = []
-                if m.get("jumping"):
-                    tags.append("jumping")
-                if m.get("prone"):
-                    tags.append("prone")
-                d = m.get("java_dist_to_enemy", -1)
-                if i == closest_idx and d >= 0:
-                    tags.append(f"closest to enemy, dist={d:.1f}")
-                tag_str = f"  [{', '.join(tags)}]" if tags else ""
-                lines.append(f"  #{idx}: ({dx},{dy}) facing {fn}, {mp} MP{tag_str}")
+        _format_moves_flat(lines, moves)
 
     return "\n".join(lines)
+
+
+def _format_moves_flat(lines: list[str], moves: list) -> None:
+    """Format legal moves as a flat list (original format)."""
+    is_deployment = "elevation" in moves[0] and "mp_used" not in moves[0]
+
+    if is_deployment:
+        lines.append(f"--- DEPLOYMENT MOVES ({len(moves)} total) ---")
+        for m in moves[:5]:
+            idx = m.get("index", "?")
+            dx, dy = m.get("dest_x", "?"), m.get("dest_y", "?")
+            f = m.get("facing", 0)
+            fn = _FACING_NAMES[f] if 0 <= f < 6 else str(f)
+            elev = m.get("elevation", 0)
+            lines.append(f"  #{idx}: ({dx},{dy}) facing {fn}, elev={elev}")
+        if len(moves) > 5:
+            lines.append(f"  ... and {len(moves) - 5} more")
+    else:
+        mp_vals = [m.get("mp_used", 0) for m in moves]
+        xs = [m["dest_x"] for m in moves if m.get("dest_x", -1) >= 0]
+        ys = [m["dest_y"] for m in moves if m.get("dest_y", -1) >= 0]
+        n_jumping = sum(1 for m in moves if m.get("jumping"))
+        n_prone = sum(1 for m in moves if m.get("prone"))
+
+        mp_lo, mp_hi = min(mp_vals), max(mp_vals)
+        summary_parts = [f"MP range: {mp_lo}-{mp_hi}"]
+        if xs:
+            summary_parts.append(f"Dest x=[{min(xs)}..{max(xs)}], y=[{min(ys)}..{max(ys)}]")
+        if n_jumping:
+            summary_parts.append(f"Jumping: {n_jumping}")
+        if n_prone:
+            summary_parts.append(f"Prone: {n_prone}")
+
+        lines.append(f"--- LEGAL MOVES ({len(moves)} total) ---")
+        lines.append(" | ".join(summary_parts))
+
+        sample_indices: list[int] = [0]
+        for si in [1, 2]:
+            if si < len(moves) and si not in sample_indices:
+                sample_indices.append(si)
+        mid = len(moves) // 2
+        if mid not in sample_indices and mid < len(moves):
+            sample_indices.append(mid)
+        closest_idx = None
+        closest_dist = float("inf")
+        for i, m in enumerate(moves):
+            d = m.get("java_dist_to_enemy", -1)
+            if d >= 0 and d < closest_dist:
+                closest_dist = d
+                closest_idx = i
+        if closest_idx is not None and closest_idx not in sample_indices:
+            sample_indices.append(closest_idx)
+
+        lines.append("Sample moves:")
+        for i in sample_indices:
+            m = moves[i]
+            idx = m.get("index", i)
+            dx, dy = m.get("dest_x", -1), m.get("dest_y", -1)
+            f = m.get("facing", 0)
+            fn = _FACING_NAMES[f] if 0 <= f < 6 else str(f)
+            mp = m.get("mp_used", 0)
+            tags = []
+            if m.get("jumping"):
+                tags.append("jumping")
+            if m.get("prone"):
+                tags.append("prone")
+            d = m.get("java_dist_to_enemy", -1)
+            if i == closest_idx and d >= 0:
+                tags.append(f"closest to enemy, dist={d:.1f}")
+            tag_str = f"  [{', '.join(tags)}]" if tags else ""
+            lines.append(f"  #{idx}: ({dx},{dy}) facing {fn}, {mp} MP{tag_str}")
+
+
+def _format_moves_hierarchical(lines: list[str], moves: list, rl_owner_id, units: list) -> None:
+    """Format legal moves grouped by destination (hex + walk/run)."""
+    # Get walk_mp from RL unit
+    walk_mp = 0
+    for u in units:
+        if u.get("owner") == rl_owner_id:
+            walk_mp = u.get("mp_walk", 0)
+            break
+
+    destinations, _ = _group_moves_by_destination(moves, walk_mp)
+
+    # Count walk vs run destinations
+    n_walk = sum(1 for d in destinations if d["mp_used"] <= walk_mp)
+    n_run = len(destinations) - n_walk
+
+    lines.append(f"--- DESTINATIONS ({len(destinations)} from {len(moves)} moves, "
+                 f"{n_walk} walk + {n_run} run) ---")
+
+    # Show all destinations (usually 60-80, manageable)
+    max_show = 15
+    for i, dest in enumerate(destinations[:max_show]):
+        x, y = dest["dest_x"], dest["dest_y"]
+        mp = dest["mp_used"]
+        speed = "run" if mp > walk_mp else "walk"
+        facings = dest["facing_options"]
+        facing_strs = [_FACING_NAMES[f] for f in sorted(facings.keys())]
+        lines.append(
+            f"  dest {i:>3d}: ({x:>2d},{y:>2d}) {speed:<4s} {mp:>2d}MP "
+            f"facings=[{', '.join(facing_strs)}]"
+        )
+    if len(destinations) > max_show:
+        lines.append(f"  ... and {len(destinations) - max_show} more destinations")

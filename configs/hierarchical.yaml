@@ -3,31 +3,21 @@ rl_unit: Trebuchet TBT-5S
 opponent_unit: Trebuchet TBT-5S
 board: Map Set 6/16x17 Woodland
 rl_port: 9999
+env_index: 0
 java_timeout_minutes: 5
 connection_retries: 60
 connection_retry_delay: 1.0
 max_legal_moves: 500
+max_destinations: 100
 max_rotating_round_saves: 0
 paranoid_autosave: false
 save_budget_mb: 1000
 rl_starting_pos: 2
 opponent_starting_pos: 6
-rl_fixed_coords: [14, 1]
-opponent_fixed_coords: [1, 15]
+rl_fixed_coords: [8, 1]
+opponent_fixed_coords: [8, 16]
 rl_deployment: false
 firing_strategy: princess
 step_timeout_seconds: 30
 max_game_rounds: 40
 action_space_type: hierarchical
-max_destinations: 100
-
-# Training
-exp_name: sanity-check-v3
-num_envs: 22
-stagger_delay: 3.0
-total_timesteps: 1000000
-num_steps: 128
-hidden_size: 256
-ent_coef: 0.05
-learning_rate: 0.0003
-save_interval: 25

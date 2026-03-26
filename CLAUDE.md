@@ -53,7 +53,7 @@ The Java side lives at:
 |------|---------|
 | `RLGameRunner.java` | Headless game lifecycle manager; entry point launched by Gradle |
 | `RLBotClient.java` | Bot client that opens a `ServerSocket` bridge to the Python agent |
-| `ObservationBuilder.java` | Serializes full game state (board, units, legal moves) to JSON |
+| `ObservationBuilder.java` | Serializes full game state (board, units, legal moves) to JSON. Weapon damage for cluster weapons (SRM/LRM) is serialized as effective damage (rackSize × per-missile damage: SRM=2, LRM=1) rather than the raw `getDamage()` sentinel (-2). |
 | `ActionTranslator.java` | Parses `{"type": "action", "move_index": N}` and returns the corresponding `MovePath` |
 | `RewardCalculator.java` | Tracks armor/internal damage between steps; computes per-step and episode rewards |
 | `LosLookupTable.java` | Precomputed LOS for all hex pairs; built once per JVM, cached in `RLBotClient` |

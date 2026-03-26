@@ -136,3 +136,8 @@ class TestMegaMekConfig:
         assert "rl_fixed_coords" not in content
         assert "opponent_fixed_coords" not in content
         Path(path).unlink()
+
+    def test_hierarchical_config_defaults(self):
+        cfg = MegaMekConfig()
+        assert cfg.action_space_type == "flat"
+        assert cfg.max_destinations == 100

@@ -3,14 +3,21 @@
 import numpy as np
 import pytest
 
+import torch
+
 from megamek_gym.observation import (
     BOARD_SIZE,
+    DEST_FEATURES,
+    FACING_FEATURES,
     GLOBAL_FEATURES,
     MOVE_FEATURES,
     OBS_SIZE,
     UNIT_FEATURES,
+    _group_moves_by_destination,
     compute_obs_size,
+    compute_obs_size_hierarchical,
     flatten_observation,
+    flatten_observation_hierarchical,
     identify_rl_owner,
 )
 
@@ -92,11 +99,17 @@ class TestFlattenObservation:
         assert flat.dtype == np.float32
 
     def test_board_elevation(self):
+        """Board elevation block is only populated when INCLUDE_BOARD_ELEVATION is True."""
+        from megamek_gym.observation import INCLUDE_BOARD_ELEVATION
         hexes = [{"x": 3, "y": 2, "elevation": 5}]
         obs = _make_obs(hexes=hexes)
         flat = flatten_observation(obs, rl_owner_id=0)
-        idx = 2 * 16 + 3  # row 2, col 3
-        assert flat[idx] == pytest.approx(0.5)  # 5/10
+        if INCLUDE_BOARD_ELEVATION:
+            idx = 2 * 16 + 3  # row 2, col 3
+            assert flat[idx] == pytest.approx(0.5)  # 5/10
+        else:
+            # Board block is not included; unit features start at index 0
+            assert flat[0] != 0.5  # no board elevation data
 
     def test_unit_position(self):
         obs = _make_obs()
@@ -226,7 +239,7 @@ class TestMoveFeatures:
 
     def test_obs_size_with_moves(self):
         size = compute_obs_size(16, 17, max_legal_moves=1000)
-        assert size == 16 * 17 + 2 * UNIT_FEATURES + GLOBAL_FEATURES + 1000 * MOVE_FEATURES
+        assert size == BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + 1000 * MOVE_FEATURES
 
     def test_backward_compat_no_moves(self):
         """Without max_legal_moves, obs size is unchanged."""
@@ -473,3 +486,392 @@ class TestIdentifyRlOwner:
         obs = _make_obs()
         with pytest.raises(ValueError):
             identify_rl_owner(obs, active_entity_id=999)
+
+
+def _make_move(index, dest_x, dest_y, facing, mp_used):
+    """Helper to build a minimal legal move dict."""
+    return {
+        "index": index, "dest_x": dest_x, "dest_y": dest_y,
+        "facing": facing, "mp_used": mp_used,
+        "jumping": False, "prone": False, "has_los": True,
+    }
+
+
+class TestGroupMovesByDestination:
+    def test_stand_still_only(self):
+        """Single stand-still move becomes one destination with one facing."""
+        moves = [_make_move(0, 5, 7, 2, 0)]
+        dests, lookup = _group_moves_by_destination(moves, walk_mp=6)
+        assert len(dests) == 1
+        assert dests[0]["dest_x"] == 5
+        assert dests[0]["dest_y"] == 7
+        assert dests[0]["facing_options"] == {2: 0}
+        assert lookup[(0, 2)] == 0
+
+    def test_same_hex_different_facings_grouped(self):
+        """Multiple facings at the same hex via walk should be one destination."""
+        moves = [
+            _make_move(0, 5, 7, 2, 0),  # stand still
+            _make_move(1, 6, 8, 0, 3),  # walk to (6,8) facing 0, 3 MP
+            _make_move(2, 6, 8, 1, 4),  # walk to (6,8) facing 1, 4 MP (extra MP for turn)
+            _make_move(3, 6, 8, 2, 4),  # walk to (6,8) facing 2, 4 MP
+        ]
+        dests, lookup = _group_moves_by_destination(moves, walk_mp=6)
+        assert len(dests) == 2  # stand-still + one destination at (6,8)
+        hex_dest = dests[1]
+        assert hex_dest["dest_x"] == 6
+        assert hex_dest["dest_y"] == 8
+        assert set(hex_dest["facing_options"].keys()) == {0, 1, 2}
+        assert hex_dest["facing_options"][0] == 1
+        assert hex_dest["facing_options"][1] == 2
+        assert hex_dest["facing_options"][2] == 3
+
+    def test_min_mp_used_across_facings(self):
+        """mp_used on the destination should be the minimum across all facings."""
+        moves = [
+            _make_move(0, 6, 8, 0, 3),  # facing 0, 3 MP (cheapest)
+            _make_move(1, 6, 8, 1, 4),  # facing 1, 4 MP
+            _make_move(2, 6, 8, 3, 5),  # facing 3, 5 MP (most expensive)
+        ]
+        dests, _ = _group_moves_by_destination(moves, walk_mp=6)
+        assert len(dests) == 1
+        assert dests[0]["mp_used"] == 3
+
+    def test_walk_and_run_separate_destinations(self):
+        """Walk and run to the same hex should produce two destinations."""
+        moves = [
+            _make_move(0, 6, 8, 0, 4),  # walk to (6,8) facing 0
+            _make_move(1, 6, 8, 1, 5),  # walk to (6,8) facing 1
+            _make_move(2, 6, 8, 0, 7),  # run to (6,8) facing 0
+            _make_move(3, 6, 8, 1, 8),  # run to (6,8) facing 1
+            _make_move(4, 6, 8, 2, 9),  # run to (6,8) facing 2
+        ]
+        dests, lookup = _group_moves_by_destination(moves, walk_mp=6)
+        assert len(dests) == 2
+        walk_dest = dests[0]
+        run_dest = dests[1]
+        # Walk destination
+        assert walk_dest["mp_used"] == 4
+        assert set(walk_dest["facing_options"].keys()) == {0, 1}
+        # Run destination
+        assert run_dest["mp_used"] == 7
+        assert set(run_dest["facing_options"].keys()) == {0, 1, 2}
+
+    def test_multiple_hexes(self):
+        """Moves to different hexes should be separate destinations."""
+        moves = [
+            _make_move(0, 5, 7, 2, 0),  # stand still at (5,7)
+            _make_move(1, 6, 8, 0, 3),  # walk to (6,8)
+            _make_move(2, 6, 8, 1, 4),  # walk to (6,8)
+            _make_move(3, 7, 7, 0, 2),  # walk to (7,7)
+            _make_move(4, 7, 7, 3, 3),  # walk to (7,7)
+        ]
+        dests, lookup = _group_moves_by_destination(moves, walk_mp=6)
+        assert len(dests) == 3  # (5,7), (6,8), (7,7)
+
+    def test_lookup_roundtrip(self):
+        """Every (dest_idx, facing) in lookup maps back to correct original move_index."""
+        moves = [
+            _make_move(0, 5, 7, 2, 0),
+            _make_move(1, 6, 8, 0, 3),
+            _make_move(2, 6, 8, 1, 4),
+            _make_move(3, 6, 8, 3, 5),
+            _make_move(4, 7, 7, 0, 2),
+        ]
+        dests, lookup = _group_moves_by_destination(moves, walk_mp=6)
+        # Every facing in every destination must be in the lookup
+        for dest_idx, dest in enumerate(dests):
+            for facing, move_idx in dest["facing_options"].items():
+                assert lookup[(dest_idx, facing)] == move_idx
+
+    def test_empty_moves(self):
+        """Empty legal moves list produces empty results."""
+        dests, lookup = _group_moves_by_destination([], walk_mp=6)
+        assert len(dests) == 0
+        assert len(lookup) == 0
+
+
+class TestHierarchicalObservation:
+    """Tests for flatten_observation_hierarchical and compute_obs_size_hierarchical."""
+
+    MAX_DEST = 20  # small cap for tests
+
+    def _make_hierarchical_obs(self, legal_moves=None):
+        """Build a test observation with legal moves for hierarchical flattening."""
+        if legal_moves is None:
+            legal_moves = [
+                _make_move(0, 5, 7, 2, 0),   # stand still
+                _make_move(1, 6, 8, 0, 3),   # walk to (6,8) facing 0
+                _make_move(2, 6, 8, 1, 4),   # walk to (6,8) facing 1
+                _make_move(3, 7, 7, 3, 5),   # walk to (7,7) facing 3
+            ]
+        obs = _make_obs()
+        obs["legal_moves"] = legal_moves
+        return obs
+
+    def test_obs_size(self):
+        """compute_obs_size_hierarchical returns correct size."""
+        size = compute_obs_size_hierarchical(16, 17, self.MAX_DEST)
+        expected = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + \
+            self.MAX_DEST * DEST_FEATURES + self.MAX_DEST * 6 * FACING_FEATURES
+        assert size == expected
+
+    def test_output_shape(self):
+        """Flattened observation has correct length."""
+        obs = self._make_hierarchical_obs()
+        flat = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        assert flat.shape == (compute_obs_size_hierarchical(16, 17, self.MAX_DEST),)
+        assert flat.dtype == np.float32
+
+    def test_base_blocks_match_flat(self):
+        """Board + unit + global blocks are identical to flat version."""
+        obs = self._make_hierarchical_obs()
+        flat = flatten_observation(obs, rl_owner_id=0)
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        base_size = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        np.testing.assert_array_equal(hier[:base_size], flat[:base_size])
+
+    def test_dest_feature_values(self):
+        """Per-destination features have expected values."""
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+
+        # Dest 0: stand-still at (5,7), mp_used=0
+        d0 = hier[base:base + DEST_FEATURES]
+        assert d0[0] == pytest.approx(5 / 16)   # dest_x / W
+        assert d0[1] == pytest.approx(7 / 17)   # dest_y / H
+        assert d0[2] == pytest.approx(0 / 20)   # mp_used / 20
+
+        # Dest 1: walk to (6,8), min mp_used=3
+        d1 = hier[base + DEST_FEATURES:base + 2 * DEST_FEATURES]
+        assert d1[0] == pytest.approx(6 / 16)
+        assert d1[1] == pytest.approx(8 / 17)
+        assert d1[2] == pytest.approx(3 / 20)
+
+        # Dest 2: walk to (7,7), mp_used=5
+        d2 = hier[base + 2 * DEST_FEATURES:base + 3 * DEST_FEATURES]
+        assert d2[0] == pytest.approx(7 / 16)
+        assert d2[1] == pytest.approx(7 / 17)
+        assert d2[2] == pytest.approx(5 / 20)
+
+    def test_unused_dest_slots_zero(self):
+        """Destination slots beyond n_destinations are zero."""
+        obs = self._make_hierarchical_obs()  # 3 destinations
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        # Slots 3..MAX_DEST-1 should be zero
+        unused_start = base + 3 * DEST_FEATURES
+        unused_end = base + self.MAX_DEST * DEST_FEATURES
+        assert np.all(hier[unused_start:unused_end] == 0.0)
+
+    def test_facing_features_valid_only(self):
+        """Facing features are non-zero only for valid (dest, facing) pairs."""
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+                         + self.MAX_DEST * DEST_FEATURES)
+
+        # Dest 0 (stand-still at (5,7) facing 2): only facing 2 should be filled
+        for f in range(6):
+            f_base = facing_offset + 0 * 6 * FACING_FEATURES + f * FACING_FEATURES
+            f_slice = hier[f_base:f_base + FACING_FEATURES]
+            if f == 2:
+                # facing 2 is valid — at least one feature should be non-zero
+                # (enemy is at (10,12) so range_quality may be non-zero)
+                pass  # don't assert non-zero; range_quality could be 0 at long range
+            else:
+                assert np.all(f_slice == 0.0), f"Facing {f} should be zero for dest 0"
+
+        # Dest 1 (walk to (6,8)): facings 0 and 1 valid, rest zero
+        for f in range(6):
+            f_base = facing_offset + 1 * 6 * FACING_FEATURES + f * FACING_FEATURES
+            f_slice = hier[f_base:f_base + FACING_FEATURES]
+            if f in (0, 1):
+                pass  # valid facing
+            else:
+                assert np.all(f_slice == 0.0), f"Facing {f} should be zero for dest 1"
+
+    def test_unused_facing_slots_zero(self):
+        """Facing slots for unused destinations are all zero."""
+        obs = self._make_hierarchical_obs()  # 3 destinations
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+                         + self.MAX_DEST * DEST_FEATURES)
+        # Destinations 3..MAX_DEST-1 should have all-zero facing features
+        unused_start = facing_offset + 3 * 6 * FACING_FEATURES
+        unused_end = facing_offset + self.MAX_DEST * 6 * FACING_FEATURES
+        assert np.all(hier[unused_start:unused_end] == 0.0)
+
+    def test_no_legal_moves(self):
+        """Empty legal moves produces all-zero move/facing blocks."""
+        obs = self._make_hierarchical_obs(legal_moves=[])
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        assert np.all(hier[base:] == 0.0)
+
+    def test_facing_head_receives_correct_dest_features(self):
+        """The agent's facing head input matches the selected destination's features.
+
+        Simulates the gather logic from HierarchicalAgent.get_action_and_value
+        and verifies that for each destination index, the sliced features match
+        the dest feature block in the observation.
+        """
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        obs_t = torch.tensor(hier, dtype=torch.float32).unsqueeze(0)  # (1, obs_size)
+
+        dest_block_offset = OBS_SIZE  # 383
+        # 3 destinations in default test obs
+        for dest_idx in range(3):
+            # Simulate the gather logic from HierarchicalAgent
+            dest_action = torch.tensor([dest_idx], dtype=torch.long)
+            dest_start = dest_block_offset + dest_action * DEST_FEATURES
+            idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES)
+            gathered = obs_t.gather(1, idx).squeeze(0).numpy()  # (7,)
+
+            # Direct slice from the flat array
+            direct = hier[
+                dest_block_offset + dest_idx * DEST_FEATURES
+                : dest_block_offset + (dest_idx + 1) * DEST_FEATURES
+            ]
+
+            np.testing.assert_array_equal(gathered, direct,
+                err_msg=f"Gathered features for dest {dest_idx} don't match direct slice")
+
+        # Dest 0 (stand-still at (5,7)): verify actual values
+        d0_gathered = hier[dest_block_offset : dest_block_offset + DEST_FEATURES]
+        assert d0_gathered[0] == pytest.approx(5 / 16)  # x
+        assert d0_gathered[1] == pytest.approx(7 / 17)  # y
+        assert d0_gathered[2] == pytest.approx(0 / 20)  # mp_used
+
+        # Dest 1 (walk to (6,8), min mp=3)
+        d1_gathered = hier[dest_block_offset + DEST_FEATURES : dest_block_offset + 2 * DEST_FEATURES]
+        assert d1_gathered[0] == pytest.approx(6 / 16)
+        assert d1_gathered[1] == pytest.approx(8 / 17)
+        assert d1_gathered[2] == pytest.approx(3 / 20)
+
+    def test_unused_dest_gives_zero_features_to_facing_head(self):
+        """Selecting an unused destination index yields all-zero features."""
+        obs = self._make_hierarchical_obs()  # 3 destinations, MAX_DEST=20
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        obs_t = torch.tensor(hier, dtype=torch.float32).unsqueeze(0)
+
+        # Pick an unused destination (index 10, well beyond the 3 valid ones)
+        dest_action = torch.tensor([10], dtype=torch.long)
+        dest_start = OBS_SIZE + dest_action * DEST_FEATURES
+        idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES)
+        gathered = obs_t.gather(1, idx).squeeze(0).numpy()
+        assert np.all(gathered == 0.0), "Unused dest should yield all-zero features"
+
+    def test_enemy_range_quality_in_dest_block(self):
+        """enemy_range_quality is at dest feature index 7 and is facing-independent."""
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+
+        # All 3 destinations should have enemy_range_quality at index 7
+        # (enemy is at (10,12) facing 4 — values depend on distance but should be set)
+        for dest_idx in range(3):
+            d = hier[base + dest_idx * DEST_FEATURES:base + (dest_idx + 1) * DEST_FEATURES]
+            # Index 7 is enemy_range_quality — should be a valid float (could be 0 at long range)
+            assert np.isfinite(d[7]), f"Dest {dest_idx} enemy_range_quality should be finite"
+
+    def test_best_rl_range_quality_in_dest_block(self):
+        """best_rl_range_quality (dest index 8) equals max of per-facing rl_range_quality."""
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        facing_offset = base + self.MAX_DEST * DEST_FEATURES
+
+        for dest_idx in range(3):
+            d = hier[base + dest_idx * DEST_FEATURES:base + (dest_idx + 1) * DEST_FEATURES]
+            best_rq = d[8]
+
+            # Gather per-facing rl_range_quality values for this dest
+            facing_rqs = []
+            for f in range(6):
+                f_base = facing_offset + dest_idx * 6 * FACING_FEATURES + f * FACING_FEATURES
+                facing_rqs.append(hier[f_base])
+
+            # best_rl_range_quality should equal max of non-zero facing values
+            # (or 0 if all facings are zero)
+            expected_max = max(facing_rqs) if any(v != 0 for v in facing_rqs) else 0.0
+            assert best_rq == pytest.approx(expected_max), \
+                f"Dest {dest_idx}: best_rl_rq={best_rq} != max(facing_rqs)={expected_max}"
+
+    def test_facing_features_single_value(self):
+        """Each facing slot has exactly FACING_FEATURES=1 value (rl_range_quality only)."""
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+                         + self.MAX_DEST * DEST_FEATURES)
+
+        assert FACING_FEATURES == 1, "This test assumes FACING_FEATURES == 1"
+
+        # Dest 0 (stand-still, facing 2 only): facing 2 slot has 1 value
+        f_base_valid = facing_offset + 0 * 6 * FACING_FEATURES + 2 * FACING_FEATURES
+        # Just verify the slot exists and is finite
+        assert np.isfinite(hier[f_base_valid])
+
+    def test_facing_head_receives_correct_facing_features(self):
+        """The agent's facing head can gather per-facing features for the selected dest."""
+        obs = self._make_hierarchical_obs()
+        hier = flatten_observation_hierarchical(
+            obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
+            legal_moves=obs["legal_moves"],
+        )
+        obs_t = torch.tensor(hier, dtype=torch.float32).unsqueeze(0)
+
+        facing_block_offset = OBS_SIZE + self.MAX_DEST * DEST_FEATURES
+        n_facing_feats = 6 * FACING_FEATURES
+
+        for dest_idx in range(3):
+            dest_action = torch.tensor([dest_idx], dtype=torch.long)
+            facing_start = facing_block_offset + dest_action * n_facing_feats
+            f_idx = facing_start.unsqueeze(1) + torch.arange(n_facing_feats)
+            gathered = obs_t.gather(1, f_idx).squeeze(0).numpy()
+
+            # Direct slice
+            direct = hier[
+                facing_block_offset + dest_idx * n_facing_feats
+                : facing_block_offset + (dest_idx + 1) * n_facing_feats
+            ]
+            np.testing.assert_array_equal(gathered, direct,
+                err_msg=f"Gathered facing features for dest {dest_idx} don't match")

@@ -489,6 +489,18 @@ class TestRangeQuality:
         unit = {"weapons": [_weapon(0, 3, 6, 9), _weapon(5, 3, 6, 9)]}
         assert range_quality(unit, 2) == pytest.approx(1.0)
 
+    def test_missile_weapon_damage_weighted(self):
+        """Commando-like loadout: ML(5) + SRM4(8) + SRM6(12) = 25 total damage."""
+        unit = {"weapons": [
+            _weapon(5, 3, 6, 9),   # Medium Laser
+            _weapon(8, 3, 6, 9),   # SRM 4 (4 * 2 dmg)
+            _weapon(12, 3, 6, 9),  # SRM 6 (6 * 2 dmg)
+        ]}
+        # All at short range: (5*1.0 + 8*1.0 + 12*1.0) / 25 = 1.0
+        assert range_quality(unit, 2) == pytest.approx(1.0)
+        # All at long range: (5*0.0 + 8*0.0 + 12*0.0) / 25 = 0.0
+        assert range_quality(unit, 8) == pytest.approx(0.0)
+
 
 # --- Range quality with facing ---
 
