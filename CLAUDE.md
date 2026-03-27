@@ -109,6 +109,7 @@ analyze_full_moves.py    # Compare current (longest-only) vs full (Pareto fronti
 analyze_move_distributions.py  # Multi-game legal move distribution analysis with matplotlib charts
 visualize_hex_map.py     # Interactive hex map viewer: board terrain, reachable hexes, unit positions
 game_viewer.py           # Combined hex map + transcript viewer (side-by-side HTML)
+bench_sim.py             # Profile sim latency (per-phase breakdown) and memory usage
 validate_sim.py          # Cross-validate Python sim against Java MegaMek (tiered tests)
 
 tests/
@@ -336,6 +337,23 @@ poetry run python mem_benchmark.py --megamek-dir ../megamek --env-counts 1,2 --e
 For each env count, starts N environments, runs a few episodes to stabilize memory, then measures per-JVM RSS (actual resident memory from `/proc`), JVM heap usage (from `[rl-mem]` log lines), and Python process RSS. Reports a summary table.
 
 The `mem_log` config field (default 0) controls Java-side memory logging verbosity: 0=off, 1=basic heap+delta, 2=pool breakdown, 3=class histogram. The benchmark enables level 1 automatically.
+
+## Sim Profiling
+
+Use `bench_sim.py` to profile the pure-Python simulator's per-phase latency and memory usage:
+
+```bash
+# Default: 20 games, full report with tracemalloc
+poetry run python bench_sim.py
+
+# Quick test with verbose per-game output
+poetry run python bench_sim.py --num-games 5 --verbose
+
+# Scaling benchmark (1/2/4/8 in-process envs)
+poetry run python bench_sim.py --scaling --env-counts 1,2,4,8
+```
+
+Monkey-patches sim internals with timing wrappers (zero sim code changes) to break down per-step latency into phases: move enumeration (RL + opponent), Princess AI, firing, heat, observation flattening, and reward computation. Also reports RSS memory at checkpoints, key object sizes, and tracemalloc top allocations.
 
 ## Memory Growth Tracking
 
