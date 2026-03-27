@@ -336,11 +336,12 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         expected_dist = hex_distance(5, 6, 10, 12)
-        max_dim = max(16, 17)
+        max_dim = 16 + 17
         assert flat[move_offset + 4] == pytest.approx(expected_dist / max_dim)
 
     def test_range_quality_feature(self):
         """RL weapon effectiveness from hypothetical move position."""
+        from megamek_gym.observation import _norm_rq
         from megamek_gym.reward import hex_distance, range_quality
         # Place enemy close enough to be in Medium Laser range (short=3)
         obs = _make_obs()
@@ -354,16 +355,17 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         dist = hex_distance(5, 6, 7, 7)
-        expected = range_quality(
+        raw_rq = range_quality(
             obs["units"][0], dist,
             target_x=7, target_y=7,
             unit_x=5, unit_y=6, unit_facing=2,
         )
-        assert flat[move_offset + 5] == pytest.approx(expected)
-        assert expected != 0.0  # sanity: should be a real score
+        assert flat[move_offset + 5] == pytest.approx(_norm_rq(raw_rq))
+        assert raw_rq != 0.0  # sanity: should be a real score
 
     def test_enemy_range_quality_feature(self):
         """Enemy weapon effectiveness at move distance."""
+        from megamek_gym.observation import _norm_rq
         from megamek_gym.reward import hex_distance, range_quality
         obs = _make_obs()
         obs["units"][1]["x"] = 7
@@ -375,13 +377,13 @@ class TestTacticalMoveFeatures:
         )
         move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
         dist = hex_distance(5, 6, 7, 7)
-        expected = range_quality(
+        raw_rq = range_quality(
             obs["units"][1], dist,
             target_x=5, target_y=6,
             unit_x=7, unit_y=7, unit_facing=4,
         )
-        assert flat[move_offset + 6] == pytest.approx(expected)
-        assert expected != 0.0
+        assert flat[move_offset + 6] == pytest.approx(_norm_rq(raw_rq))
+        assert raw_rq != 0.0
 
     def test_terrain_cover_feature(self):
         """Cover value at move destination."""
@@ -475,6 +477,70 @@ class TestTacticalMoveFeatures:
         pad_start = move_offset + 2 * MOVE_FEATURES
         pad_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
         np.testing.assert_array_equal(flat[pad_start:pad_end], 0.0)
+
+
+class TestFeatureBounds:
+    """Verify all features stay within expected [0, 1] bounds."""
+
+    MAX_MOVES = 10
+
+    def test_dist_to_enemy_worst_case(self):
+        """Distance feature stays <= 1.0 even for max-distance corners."""
+        from megamek_gym.reward import hex_distance
+        obs = _make_obs()
+        # Place units at opposite corners
+        obs["units"][0]["x"] = 0
+        obs["units"][0]["y"] = 0
+        obs["units"][1]["x"] = 15
+        obs["units"][1]["y"] = 16
+        obs["legal_moves"] = [
+            {"index": 0, "dest_x": 0, "dest_y": 0, "facing": 0, "mp_used": 0,
+             "jumping": False, "prone": False, "has_los": True},
+        ]
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        dist_feat = flat[move_offset + 4]
+        assert 0.0 < dist_feat <= 1.0, f"dist_to_enemy={dist_feat} exceeds [0, 1]"
+
+    def test_range_quality_in_bounds(self):
+        """Range quality features are in [0, 1] after normalization."""
+        obs = _make_obs()
+        obs["units"][1]["x"] = 7
+        obs["units"][1]["y"] = 7
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        rl_rq = flat[move_offset + 5]
+        enemy_rq = flat[move_offset + 6]
+        assert 0.0 <= rl_rq <= 1.0, f"rl_range_quality={rl_rq} out of [0, 1]"
+        assert 0.0 <= enemy_rq <= 1.0, f"enemy_range_quality={enemy_rq} out of [0, 1]"
+
+    def test_range_quality_out_of_range(self):
+        """Out-of-range weapons produce low but non-negative range_quality."""
+        obs = _make_obs()
+        # Enemy far away — all weapons out of range
+        obs["units"][1]["x"] = 15
+        obs["units"][1]["y"] = 16
+        obs["legal_moves"] = [
+            {"index": 0, "dest_x": 0, "dest_y": 0, "facing": 0, "mp_used": 0,
+             "jumping": False, "prone": False, "has_los": True},
+        ]
+        flat = flatten_observation(
+            obs, rl_owner_id=0,
+            legal_moves=obs["legal_moves"],
+            max_legal_moves=self.MAX_MOVES,
+        )
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        rl_rq = flat[move_offset + 5]
+        # Raw rq is [-0.5, -0.25] (arc penalty on rear weapons), normalized to [0.0, ~0.17]
+        assert 0.0 <= rl_rq <= 0.2, f"out-of-range rq should be near 0, got {rl_rq}"
 
 
 class TestIdentifyRlOwner:

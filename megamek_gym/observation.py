@@ -6,6 +6,11 @@ import numpy as np
 
 from megamek_gym.reward import cover_value, hex_distance, range_quality
 
+
+def _norm_rq(rq: float) -> float:
+    """Normalize range_quality from [-0.5, 1.0] to [0.0, 1.0]."""
+    return (rq + 0.5) / 1.5
+
 # Board elevation grid — disabled for MLP (spatial grid is hard for MLPs to use;
 # per-dest elevation_diff already captures the decision-relevant signal).
 # Re-enable for CNN architecture by setting to True.
@@ -204,7 +209,7 @@ def _flatten_dest_features(
     else:
         ex = ey = enemy_facing = None
 
-    max_dim = max(board_width, board_height)
+    max_dim = board_width + board_height
     elev_map: dict[tuple[int, int], float] = {}
     if board_hexes:
         for h in board_hexes:
@@ -247,12 +252,12 @@ def _flatten_dest_features(
             buf[base + 6] = float(legal_moves[any_move_idx].get("has_los", False))
 
             # Enemy range quality (facing-independent — depends on enemy's facing, not ours)
-            buf[base + 7] = range_quality(
+            buf[base + 7] = _norm_rq(range_quality(
                 enemy_unit, dist,
                 target_x=dest_x, target_y=dest_y,
                 unit_x=ex, unit_y=ey,
                 unit_facing=enemy_facing,
-            )
+            ))
 
         # --- Per-facing features (6 facings × 1: rl_range_quality only) ---
         for facing, move_idx in dest["facing_options"].items():
@@ -266,12 +271,12 @@ def _flatten_dest_features(
                     unit_x=dest_x, unit_y=dest_y,
                     unit_facing=facing,
                 ) if rl_unit else 0.0
-                buf[f_base] = rl_rq
+                buf[f_base] = _norm_rq(rl_rq)
                 if rl_rq > best_rl_rq:
                     best_rl_rq = rl_rq
 
         # Best RL range quality across all available facings
-        buf[base + 8] = best_rl_rq
+        buf[base + 8] = _norm_rq(best_rl_rq)
 
 
 def _flatten_move_features(
@@ -302,7 +307,7 @@ def _flatten_move_features(
     else:
         ex = ey = enemy_facing = None
 
-    max_dim = max(board_width, board_height)
+    max_dim = board_width + board_height
     elev_map: dict[tuple[int, int], float] = {}
     if board_hexes:
         for h in board_hexes:
@@ -330,20 +335,20 @@ def _flatten_move_features(
             buf[base + 4] = dist / max_dim
 
             # RL weapon effectiveness from this hypothetical position
-            buf[base + 5] = range_quality(
+            buf[base + 5] = _norm_rq(range_quality(
                 rl_unit, dist,
                 target_x=ex, target_y=ey,
                 unit_x=dest_x, unit_y=dest_y,
                 unit_facing=facing,
-            ) if rl_unit else 0.0
+            )) if rl_unit else 0.0
 
             # Enemy weapon effectiveness at this distance
-            buf[base + 6] = range_quality(
+            buf[base + 6] = _norm_rq(range_quality(
                 enemy_unit, dist,
                 target_x=dest_x, target_y=dest_y,
                 unit_x=ex, unit_y=ey,
                 unit_facing=enemy_facing,
-            )
+            ))
 
             # Terrain cover at destination
             if board_hexes:
