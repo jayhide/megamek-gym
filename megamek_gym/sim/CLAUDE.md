@@ -119,6 +119,6 @@ poetry run python validate_sim.py --megamek-dir ../megamek --only legal_moves --
 
 ### Current status (known divergences)
 
-- **LOS**: Sim's simplified hex-line trace diverges significantly from MegaMek's full LOS algorithm (~55% mismatch rate). Highest-priority fix.
-- **Legal moves**: Sim BFS generates ~500 moves vs Java's ~350. Root causes: MP cost differences (sim sometimes finds cheaper paths), walk/run classification disagreements, and some hexes reachable in one engine but not the other.
+- **LOS**: ~2% mismatch rate. Remaining mismatches are from hex line tracing differences (cube-coordinate interpolation vs Java's geometric intersection). The accumulated woods threshold (≥3 points), foliage height (hexEl+2), elevation gating (strict `>`), and divided-line handling all match Java.
+- **Legal moves**: ~97% hex match rate, 0 java-only hexes for standing movement. Remaining differences: walk/run variant counting (Java keeps both walk and run paths to same destination more aggressively), prone movement with damaged legs (sim doesn't model actuator damage reducing MP), and minor MP cost differences from BFS path selection order.
 - Board, unit template, distances, to-hit components, damage consistency, heat consistency all **pass**.
