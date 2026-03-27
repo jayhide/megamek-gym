@@ -589,7 +589,7 @@ class CompositeReward(RewardFunction):
                 (RangeAdvantageReward(), 0.5),
                 (CoverReward(), 0.05),
                 (PronePenaltyReward(), 0.5),
-                (WinLossReward(), 5.0),
+                (WinLossReward(), 1.0),
             ]
         self.components = components
         self.last_details: list[tuple[str, float, float]] = []
