@@ -10,10 +10,12 @@ OUTCOME_MAP = {1: "WIN", -1: "LOSS", 0: "DRAW"}
 
 
 class Agent(nn.Module):
-    def __init__(self, obs_size, action_size, hidden_size=512):
+    def __init__(self, obs_size, action_size, hidden_size=512, critic_obs_size=None):
         super().__init__()
+        self.critic_obs_size = critic_obs_size
+        critic_input = critic_obs_size if critic_obs_size is not None else obs_size
         self.critic = nn.Sequential(
-            nn.Linear(obs_size, hidden_size),
+            nn.Linear(critic_input, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -28,6 +30,8 @@ class Agent(nn.Module):
         )
 
     def get_value(self, obs):
+        if self.critic_obs_size is not None:
+            obs = obs[:, :self.critic_obs_size]
         return self.critic(obs)
 
     def get_action_and_value(self, obs, action_mask, action=None):
@@ -44,10 +48,11 @@ class Agent(nn.Module):
 class HierarchicalAgent(nn.Module):
     """Autoregressive agent: pick destination, then pick facing conditioned on destination."""
 
-    def __init__(self, obs_size, max_destinations, num_facings=6, hidden_size=512):
+    def __init__(self, obs_size, max_destinations, num_facings=6, hidden_size=512, critic_obs_size=None):
         super().__init__()
         self.max_destinations = max_destinations
         self.num_facings = num_facings
+        self.critic_obs_size = critic_obs_size
         self.dest_block_offset = OBS_SIZE  # where dest features start in flat obs
         self.facing_block_offset = OBS_SIZE + max_destinations * DEST_FEATURES
 
@@ -70,9 +75,10 @@ class HierarchicalAgent(nn.Module):
             nn.Linear(64, num_facings),
         )
 
-        # Value head (independent)
+        # Value head (state-only input — no action-space features)
+        critic_input = critic_obs_size if critic_obs_size is not None else obs_size
         self.critic = nn.Sequential(
-            nn.Linear(obs_size, hidden_size),
+            nn.Linear(critic_input, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -80,6 +86,8 @@ class HierarchicalAgent(nn.Module):
         )
 
     def get_value(self, obs):
+        if self.critic_obs_size is not None:
+            obs = obs[:, :self.critic_obs_size]
         return self.critic(obs)
 
     def get_action_and_value(self, obs, dest_mask, facing_mask, action=None):
@@ -146,6 +154,14 @@ class HierarchicalAgent(nn.Module):
         return combined_action, log_prob, entropy, value
 
 
+def load_config_from_checkpoint(checkpoint_path, device=None):
+    """Load the MegaMekConfig dict stored in a checkpoint."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    return checkpoint.get("config", {})
+
+
 def load_agent(checkpoint_path, obs_size, action_size, device=None):
     """Load a trained Agent from a checkpoint file.
 
@@ -154,8 +170,11 @@ def load_agent(checkpoint_path, obs_size, action_size, device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    hidden_size = checkpoint.get("config", checkpoint.get("args", {})).get("hidden_size", 512)
-    agent = Agent(obs_size, action_size, hidden_size=hidden_size).to(device)
+    cfg = checkpoint.get("config", checkpoint.get("args", {}))
+    hidden_size = cfg.get("hidden_size", 512)
+    # Old checkpoints lack critic_obs_size — fall back to full obs (no slicing)
+    critic_obs_size = cfg.get("critic_obs_size", None)
+    agent = Agent(obs_size, action_size, hidden_size=hidden_size, critic_obs_size=critic_obs_size).to(device)
     agent.load_state_dict(checkpoint["model"])
     agent.eval()
     return agent, checkpoint, device
@@ -169,8 +188,11 @@ def load_hierarchical_agent(checkpoint_path, obs_size, max_destinations, device=
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    hidden_size = checkpoint.get("config", checkpoint.get("args", {})).get("hidden_size", 512)
-    agent = HierarchicalAgent(obs_size, max_destinations, hidden_size=hidden_size).to(device)
+    cfg = checkpoint.get("config", checkpoint.get("args", {}))
+    hidden_size = cfg.get("hidden_size", 512)
+    # Old checkpoints lack critic_obs_size — fall back to full obs (no slicing)
+    critic_obs_size = cfg.get("critic_obs_size", None)
+    agent = HierarchicalAgent(obs_size, max_destinations, hidden_size=hidden_size, critic_obs_size=critic_obs_size).to(device)
     agent.load_state_dict(checkpoint["model"])
     agent.eval()
     return agent, checkpoint, device

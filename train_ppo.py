@@ -18,6 +18,7 @@ import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
 from megamek_gym.agent import Agent, HierarchicalAgent
+from megamek_gym.observation import OBS_SIZE
 from megamek_gym.config import MegaMekConfig
 
 
@@ -128,7 +129,9 @@ if __name__ == "__main__":
         checkpoint = torch.load(args.resume, map_location="cpu")
         # Use checkpoint config as base if no --config was explicitly provided
         if not args.config:
-            cfg = MegaMekConfig(**checkpoint["config"])
+            # Filter out keys not in MegaMekConfig (e.g. critic_obs_size)
+            valid_fields = {f.name for f in dataclasses.fields(MegaMekConfig)}
+            cfg = MegaMekConfig(**{k: v for k, v in checkpoint["config"].items() if k in valid_fields})
             # Re-apply CLI overrides on top of checkpoint config
             for config_key, cli_val in cli_overrides.items():
                 if hasattr(cfg, config_key):
@@ -148,7 +151,7 @@ if __name__ == "__main__":
     if checkpoint is not None:
         run_name = checkpoint.get("run_name", Path(args.resume).parent.parent.name)
     else:
-        run_name = f"{cfg.exp_name}__{cfg.seed}__{int(time.time())}"
+        run_name = f"{cfg.exp_name}__{cfg.seed}__{time.strftime('%Y%m%d_%H%M%S')}"
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n" + "\n".join(
@@ -188,10 +191,11 @@ if __name__ == "__main__":
         hierarchical = cfg.action_space_type == "hierarchical"
         obs_size = envs.single_observation_space.shape[0]
 
+        critic_obs_size = OBS_SIZE
         if hierarchical:
-            agent = HierarchicalAgent(obs_size, cfg.max_destinations, hidden_size=cfg.hidden_size).to(device)
+            agent = HierarchicalAgent(obs_size, cfg.max_destinations, hidden_size=cfg.hidden_size, critic_obs_size=critic_obs_size).to(device)
         else:
-            agent = Agent(obs_size, envs.single_action_space.n, hidden_size=cfg.hidden_size).to(device)
+            agent = Agent(obs_size, envs.single_action_space.n, hidden_size=cfg.hidden_size, critic_obs_size=critic_obs_size).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
         if checkpoint is not None:
@@ -268,9 +272,9 @@ if __name__ == "__main__":
         print(f"  Device: {device} | Envs: {cfg.num_envs} | Stagger: {cfg.stagger_delay}s")
         n_params = sum(p.numel() for p in agent.parameters())
         if hierarchical:
-            print(f"  Obs: {obs_size} | Action: MultiDiscrete([{cfg.max_destinations}, 6]) | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
+            print(f"  Obs: {obs_size} (critic: {critic_obs_size}) | Action: MultiDiscrete([{cfg.max_destinations}, 6]) | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
         else:
-            print(f"  Obs: {obs_size} | Actions: {envs.single_action_space.n} | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
+            print(f"  Obs: {obs_size} (critic: {critic_obs_size}) | Actions: {envs.single_action_space.n} | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
         print(f"  Timesteps: {cfg.total_timesteps:,} | Updates: {num_updates}")
         print(f"  Batch: {batch_size} | Minibatch: {minibatch_size}")
         print(f"  LR: {cfg.learning_rate} | Ent: {cfg.ent_coef} | Gamma: {cfg.gamma}")
@@ -549,12 +553,14 @@ if __name__ == "__main__":
             # Checkpointing
             if update % cfg.save_interval == 0:
                 os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
+                cfg_dict = dataclasses.asdict(cfg)
+                cfg_dict["critic_obs_size"] = critic_obs_size
                 save_checkpoint = {
                     "model": agent.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "global_step": global_step,
                     "update": update,
-                    "config": dataclasses.asdict(cfg),
+                    "config": cfg_dict,
                     "run_name": run_name,
                     "obs_rms": [{"mean": rms.mean.tolist(), "var": rms.var.tolist(),
                                  "count": float(rms.count)}
