@@ -95,12 +95,6 @@ configs/
 ├── asymmetric.yaml      # COM-2D (RL) vs Flea FLE-15 (short-range opponent)
 └── quick_test.yaml      # Fast smoke test settings
 
-tests/
-├── test_config.py            # Config parsing, validation, and YAML roundtrip tests
-├── test_cross_validation.py  # Python-vs-Java cross-validation (hex distance, firing arcs)
-├── test_observation.py       # Observation flattening correctness tests
-└── test_reward.py            # Reward function logic tests
-
 smoke_test_all.py        # Consolidated smoke test — run after any RL bridge changes
 smoke_test.py            # Quick single-episode integration test with live Java process
 smoke_test_truncation.py # Tests max_game_rounds truncation (RL bot stands still)
@@ -115,6 +109,24 @@ analyze_full_moves.py    # Compare current (longest-only) vs full (Pareto fronti
 analyze_move_distributions.py  # Multi-game legal move distribution analysis with matplotlib charts
 visualize_hex_map.py     # Interactive hex map viewer: board terrain, reachable hexes, unit positions
 game_viewer.py           # Combined hex map + transcript viewer (side-by-side HTML)
+validate_sim.py          # Cross-validate Python sim against Java MegaMek (tiered tests)
+
+tests/
+├── test_config.py            # Config parsing, validation, and YAML roundtrip tests
+├── test_cross_validation.py  # Python-vs-Java cross-validation (hex distance, firing arcs)
+├── test_observation.py       # Observation flattening correctness tests
+├── test_reward.py            # Reward function logic tests
+└── sim_validation/           # Sim-vs-Java cross-validation suite
+    ├── collector.py          # Run Java game, collect per-step observation traces
+    ├── reconstruct.py        # Build sim.Unit from Java observation dict
+    ├── test_board.py         # Board terrain/elevation comparison
+    ├── test_unit_template.py # Unit armor, weapons, MP comparison
+    ├── test_los.py           # LOS comparison
+    ├── test_legal_moves.py   # Legal move set comparison (highest priority)
+    ├── test_to_hit.py        # To-hit modifier tables + distance cross-validation
+    ├── test_damage.py        # Damage consistency via armor deltas
+    ├── test_heat.py          # Heat consistency
+    └── test_statistical.py   # Game distribution comparison
 ```
 
 ## Configuration

@@ -90,3 +90,35 @@ Currently only Trebuchet TBT-5S is defined. To add a new unit:
 Currently the Woodland board is hardcoded. To add a new board:
 1. Parse the `.board` file and add terrain data to `board.py`
 2. The `LosTable` will recompute automatically for any board size
+
+## Cross-Validation Against Java MegaMek
+
+Run `validate_sim.py` to compare the Python sim against a live Java MegaMek game:
+
+```bash
+# All tiers (requires Java MegaMek)
+poetry run python validate_sim.py --megamek-dir ../megamek
+
+# Tier 1 only (deterministic: board, unit, LOS, legal moves, distances, to-hit)
+poetry run python validate_sim.py --megamek-dir ../megamek --tier 1 --verbose
+
+# Tier 2 only (damage/heat consistency via armor deltas)
+poetry run python validate_sim.py --megamek-dir ../megamek --tier 2 --random-actions --max-rounds 15
+
+# Single test
+poetry run python validate_sim.py --megamek-dir ../megamek --only legal_moves --verbose
+```
+
+### Validation tiers
+
+| Tier | Tests | Method |
+|------|-------|--------|
+| 1 | board, unit_template, los, legal_moves, distances, to_hit_components | Exact match (deterministic) |
+| 2 | damage, heat | Infer outcomes from Java armor/heat deltas |
+| 3 | statistical | Compare distributions over many games |
+
+### Current status (known divergences)
+
+- **LOS**: Sim's simplified hex-line trace diverges significantly from MegaMek's full LOS algorithm (~55% mismatch rate). Highest-priority fix.
+- **Legal moves**: Sim BFS generates ~500 moves vs Java's ~350. Root causes: MP cost differences (sim sometimes finds cheaper paths), walk/run classification disagreements, and some hexes reachable in one engine but not the other.
+- Board, unit template, distances, to-hit components, damage consistency, heat consistency all **pass**.

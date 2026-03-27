@@ -91,8 +91,8 @@ TBT_5S = UnitTemplate(
         Location.LT: (11, 5, 12),
         Location.RA: (10, 0, 8),
         Location.LA: (10, 0, 8),
-        Location.RL: (15, 0, 8),
-        Location.LL: (15, 0, 8),
+        Location.RL: (15, 0, 12),
+        Location.LL: (15, 0, 12),
     },
     weapons=[
         WeaponData("Medium Laser", Location.RA, 5, 3, 0, 3, 6, 9, False, 0),
@@ -300,10 +300,18 @@ class Unit:
 
     @property
     def gunnery_modifier(self) -> int:
-        """Heat-based gunnery penalty."""
-        if self.heat < 8:
-            return 0
-        return min(self.heat // 4, 5)  # +1 per 4 heat above 7
+        """Heat-based gunnery penalty (Total Warfare p.153)."""
+        if self.heat >= 25:
+            return 5
+        elif self.heat >= 21:
+            return 4
+        elif self.heat >= 17:
+            return 3
+        elif self.heat >= 13:
+            return 2
+        elif self.heat >= 8:
+            return 1
+        return 0
 
     def is_alive(self) -> bool:
         """Unit is still in the fight."""

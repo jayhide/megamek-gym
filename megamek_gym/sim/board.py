@@ -16,6 +16,8 @@ class Terrain(IntEnum):
     CLEAR = 0
     LIGHT_WOODS = 1
     HEAVY_WOODS = 2
+    WATER = 3       # Impassable for ground mechs
+    ROUGH = 4       # +1 MP to enter
 
 
 class HexData(NamedTuple):
@@ -35,10 +37,10 @@ def _parse_board() -> dict[tuple[int, int], HexData]:
     hexes: dict[tuple[int, int], HexData] = {}
     for line in _BOARD_DATA.strip().splitlines():
         parts = line.split()
-        # Format: hex XXYY elevation "terrain" ""
+        # Format: XXYY elevation "terrain"
         hex_id = parts[0]
         elev = int(parts[1])
-        terrain_str = parts[2]
+        terrain_str = parts[2] if len(parts) > 2 else ""
 
         col = int(hex_id[:2]) - 1  # 0-based x
         row = int(hex_id[2:]) - 1  # 0-based y
@@ -47,6 +49,10 @@ def _parse_board() -> dict[tuple[int, int], HexData]:
             terrain = Terrain.HEAVY_WOODS
         elif "woods:1" in terrain_str:
             terrain = Terrain.LIGHT_WOODS
+        elif "water" in terrain_str:
+            terrain = Terrain.WATER
+        elif "rough" in terrain_str:
+            terrain = Terrain.ROUGH
         else:
             terrain = Terrain.CLEAR
 
@@ -132,7 +138,13 @@ class Board:
             return 1
         elif t == Terrain.HEAVY_WOODS:
             return 2
+        elif t == Terrain.ROUGH:
+            return 1
         return 0
+
+    def is_passable(self, x: int, y: int) -> bool:
+        """Check if a ground mech can enter this hex."""
+        return self.terrain(x, y) != Terrain.WATER
 
     def to_obs_hexes(self) -> list[dict]:
         """Produce hex list matching Java's ObservationBuilder format."""
@@ -145,6 +157,10 @@ class Board:
                     terrain_str = "Light Woods"
                 elif h.terrain == Terrain.HEAVY_WOODS:
                     terrain_str = "Heavy Woods"
+                elif h.terrain == Terrain.WATER:
+                    terrain_str = "Water"
+                elif h.terrain == Terrain.ROUGH:
+                    terrain_str = "Rough"
                 result.append({
                     "x": x,
                     "y": y,

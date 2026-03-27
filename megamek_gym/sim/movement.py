@@ -41,13 +41,23 @@ def _init_neighbor_table(board: Board) -> None:
 
 def _hex_mp_cost_fast(board: Board, from_x: int, from_y: int,
                       to_x: int, to_y: int) -> int:
-    """Total MP cost to enter a hex from an adjacent hex."""
-    cost = 1  # Base
+    """Total MP cost to enter a hex from an adjacent hex.
+
+    Returns -1 if the hex is impassable (water).
+    """
     t = board.terrain(to_x, to_y)
+
+    # Water is impassable for ground mechs
+    if t == Terrain.WATER:
+        return -1
+
+    cost = 1  # Base
     if t == Terrain.LIGHT_WOODS:
         cost += 1
     elif t == Terrain.HEAVY_WOODS:
         cost += 2
+    elif t == Terrain.ROUGH:
+        cost += 1
 
     diff = board.elevation(to_x, to_y) - board.elevation(from_x, from_y)
     if diff > 0:
@@ -133,6 +143,9 @@ def _enumerate_standing_moves(unit: Unit, board: Board) -> list[dict]:
 
         for nx, ny in nbrs:
             cost = _hex_mp_cost_fast(board, cx, cy, nx, ny)
+            if cost < 0:
+                continue  # Impassable (water)
+
             new_mp = mp + cost
 
             if new_mp > run_mp:
@@ -269,6 +282,9 @@ def _enumerate_prone_moves(unit: Unit, board: Board) -> list[dict]:
 
         for nx, ny in nbrs:
             cost = _hex_mp_cost_fast(board, cx, cy, nx, ny)
+            if cost < 0:
+                continue  # Impassable (water)
+
             new_mp = mp + cost
 
             if new_mp > max_mp:
