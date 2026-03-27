@@ -81,20 +81,16 @@ def enumerate_moves(unit: Unit, board: Board,
     return moves
 
 
-def _is_better(new_mp: int, new_hm: int, new_psr: float,
-               e_mp: int, e_hm: int, e_psr: float) -> bool:
-    """Check if a new path is better than an existing one.
+def _is_better_output(new_hm: int, new_psr: float,
+                      e_hm: int, e_psr: float) -> bool:
+    """Check if a new path is better for output selection.
 
-    Prefers less MP used, then more hexes moved, then higher PSR.
-    Matches Java's MovePathMinMPMaxDistanceComparator.
+    Matches Java's isBetterPath: prefers more hexes moved (better TMM
+    defensive modifier), tiebroken by higher PSR success probability.
     """
-    if new_mp < e_mp:
-        return True
-    if new_mp == e_mp and new_hm > e_hm:
-        return True
-    if new_mp == e_mp and new_hm == e_hm and new_psr > e_psr:
-        return True
-    return False
+    if new_hm != e_hm:
+        return new_hm > e_hm
+    return new_psr > e_psr
 
 
 def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
@@ -106,6 +102,17 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
     Returns (best_walk, best_run) dicts mapping
     (x, y, facing) -> (mp_used, hexes_moved, psr_prob).
 
+    Uses multi-objective exploration to match Java's LongestPathFinder, which
+    keeps a deque of Pareto-optimal paths per state. A state is re-explored
+    when EITHER a cheaper path (lower MP) or a longer path (more hexes) is
+    found within each walk/run category. This ensures intermediate states are
+    explored via both short routes (for reachability) and long routes (for TMM),
+    allowing the BFS to find both walk-speed and run-speed variants that Java
+    finds through its multi-path storage.
+
+    Output dicts store the best path per Java's isBetterPath criterion: most
+    hexes moved, tiebroken by highest PSR success probability.
+
     Transitions:
     - FORWARD: move to hex in current facing direction (terrain MP cost)
     - TURN_LEFT/RIGHT: same hex, facing ±1 (1 MP each, or 0 if free_turns)
@@ -114,12 +121,23 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
     """
     turn_cost = 0 if free_turns else 1
 
-    # State: (x, y, facing, mp_used, hexes_moved, psr_prob)
+    # Output dicts: track best path per Java's criterion (max hexes, then PSR)
     best_walk: dict[tuple[int, int, int], tuple[int, int, float]] = {}
     best_run: dict[tuple[int, int, int], tuple[int, int, float]] = {}
 
+    # Multi-objective exploration: track (min_mp, max_hm) per state per
+    # category. Re-explore when either objective improves. Bounded by
+    # run_mp × states per category (each state explored at most run_mp times
+    # for hexes improvements + once for each cheaper path).
+    min_mp_walk: dict[tuple[int, int, int], int] = {}
+    max_hm_walk: dict[tuple[int, int, int], int] = {}
+    min_mp_run: dict[tuple[int, int, int], int] = {}
+    max_hm_run: dict[tuple[int, int, int], int] = {}
+
     start_key = (start_x, start_y, start_facing)
     best_walk[start_key] = (0, 0, 1.0)
+    min_mp_walk[start_key] = 0
+    max_hm_walk[start_key] = 0
 
     queue: list[tuple[int, int, int, int, int, float]] = [
         (start_x, start_y, start_facing, 0, 0, 1.0)
@@ -139,16 +157,25 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
             key = (cx, cy, new_facing)
             is_run = new_mp > walk_mp
             best = best_run if is_run else best_walk
+            min_mp_d = min_mp_run if is_run else min_mp_walk
+            max_hm_d = max_hm_run if is_run else max_hm_walk
+
+            # Update output dict (best path for this walk/run category)
             existing = best.get(key)
-
-            should_add = False
-            if existing is None:
-                should_add = True
-            else:
-                should_add = _is_better(new_mp, hm, psr, *existing)
-
-            if should_add:
+            if existing is None or _is_better_output(hm, psr, existing[1], existing[2]):
                 best[key] = (new_mp, hm, psr)
+
+            # Re-explore if cheaper MP or more hexes (multi-objective gate)
+            prev_min = min_mp_d.get(key)
+            prev_max = max_hm_d.get(key)
+            should_explore = False
+            if prev_min is None or new_mp < prev_min:
+                min_mp_d[key] = new_mp
+                should_explore = True
+            if prev_max is None or hm > prev_max:
+                max_hm_d[key] = hm
+                should_explore = True
+            if should_explore:
                 queue.append((cx, cy, new_facing, new_mp, hm, psr))
 
         # --- FORWARD transition (move in facing direction) ---
@@ -184,16 +211,25 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
         key = (nx, ny, cf)  # After FORWARD, facing stays the same
         is_run = new_mp > walk_mp
         best = best_run if is_run else best_walk
+        min_mp_d = min_mp_run if is_run else min_mp_walk
+        max_hm_d = max_hm_run if is_run else max_hm_walk
+
+        # Update output dict (best path for this walk/run category)
         existing = best.get(key)
-
-        should_add = False
-        if existing is None:
-            should_add = True
-        else:
-            should_add = _is_better(new_mp, new_hm, new_psr, *existing)
-
-        if should_add:
+        if existing is None or _is_better_output(new_hm, new_psr, existing[1], existing[2]):
             best[key] = (new_mp, new_hm, new_psr)
+
+        # Re-explore if cheaper MP or more hexes (multi-objective gate)
+        prev_min = min_mp_d.get(key)
+        prev_max = max_hm_d.get(key)
+        should_explore = False
+        if prev_min is None or new_mp < prev_min:
+            min_mp_d[key] = new_mp
+            should_explore = True
+        if prev_max is None or new_hm > prev_max:
+            max_hm_d[key] = new_hm
+            should_explore = True
+        if should_explore:
             queue.append((nx, ny, cf, new_mp, new_hm, new_psr))
 
     return best_walk, best_run
