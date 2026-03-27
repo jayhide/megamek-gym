@@ -64,7 +64,7 @@ def enumerate_moves(unit: Unit, board: Board,
                     enemy: Unit | None = None,
                     max_moves: int = 500) -> list[dict]:
     """Enumerate legal moves for a unit."""
-    if unit.destroyed or not unit.deployed:
+    if unit.destroyed or unit.shutdown or not unit.deployed:
         return []
 
     if unit.prone:

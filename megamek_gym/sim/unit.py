@@ -287,12 +287,13 @@ class Unit:
 
     @property
     def walk_mp(self) -> int:
-        """Current walk MP (reduced by leg damage).
+        """Current walk MP (reduced by leg damage and heat).
 
-        Matches Java BipedMek.getWalkMP():
+        Matches Java BipedMek.getWalkMP() + Entity.getHeatMPReduction():
         - Destroyed leg: MP = 0
         - Hip destroyed: MP = ceil(MP / 2) (applied per leg, sequentially)
         - Each non-hip actuator crit (upper leg, lower leg, foot): MP -= 1
+        - Heat penalty: MP -= heat // 5
         """
         mp = self.template.walk_mp
         for i, loc in enumerate((Location.RL, Location.LL)):
@@ -301,6 +302,7 @@ class Unit:
             if self.hip_hits[i]:
                 mp = math.ceil(mp / 2)
             mp -= self.leg_actuator_hits[i]
+        mp -= self.heat // 5
         return max(0, mp)
 
     @property
