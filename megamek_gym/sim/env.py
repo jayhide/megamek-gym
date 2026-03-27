@@ -17,6 +17,7 @@ from megamek_gym.observation import (
     flatten_observation_hierarchical,
     compute_obs_size_hierarchical,
     identify_rl_owner,
+    _group_moves_by_destination,
 )
 from megamek_gym.reward import CompositeReward
 from megamek_gym.sim.game import Game
@@ -77,7 +78,14 @@ class MegaMekSimEnv(gymnasium.Env):
         self._rl_owner: int = -1
         self._prev_obs: dict = {}
         self._curr_obs: dict = {}
+        self._last_raw_obs: dict | None = None
         self._n_legal_moves: int = 0
+        self._destinations: list = []
+        self._dest_lookup: dict = {}
+
+    @property
+    def reward_fn(self) -> CompositeReward:
+        return self._reward_fn
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -85,6 +93,7 @@ class MegaMekSimEnv(gymnasium.Env):
             self._game.rng.seed(seed)
 
         obs_dict = self._game.reset(seed=seed)
+        self._last_raw_obs = obs_dict
 
         self._rl_owner = identify_rl_owner(
             obs_dict, obs_dict["active_entity_id"]
@@ -112,6 +121,7 @@ class MegaMekSimEnv(gymnasium.Env):
         self._prev_obs = self._curr_obs
         obs_dict = self._game.step(move_idx)
         self._curr_obs = obs_dict
+        self._last_raw_obs = obs_dict
 
         terminated = obs_dict.get("terminated", False)
         truncated = obs_dict.get("truncated", False)
@@ -126,27 +136,21 @@ class MegaMekSimEnv(gymnasium.Env):
 
     def _resolve_action(self, dest_idx: int, facing_idx: int) -> int:
         """Map hierarchical (dest, facing) action to a flat move index."""
-        legal_moves = self._curr_obs.get("legal_moves", [])
-        if not legal_moves:
+        if not self._destinations:
             return 0
 
-        # Group moves by destination (reuse observation.py logic)
-        from megamek_gym.observation import _group_moves_by_destination
-        walk_mp = self._game.rl_unit.walk_mp
-        destinations, lookup = _group_moves_by_destination(legal_moves, walk_mp)
-
         # Clamp dest_idx
-        dest_idx = min(dest_idx, len(destinations) - 1)
+        dest_idx = min(dest_idx, len(self._destinations) - 1)
         if dest_idx < 0:
             return 0
 
         # Look up the move index for this (dest, facing)
-        flat_idx = lookup.get((dest_idx, facing_idx))
+        flat_idx = self._dest_lookup.get((dest_idx, facing_idx))
         if flat_idx is not None:
             return flat_idx
 
         # Facing not available for this dest — pick any available facing
-        dest = destinations[dest_idx]
+        dest = self._destinations[dest_idx]
         available = dest["facing_options"]
         if available:
             return next(iter(available.values()))
@@ -158,6 +162,16 @@ class MegaMekSimEnv(gymnasium.Env):
         legal_moves = obs_dict.get("legal_moves", [])
         self._n_legal_moves = len(legal_moves)
 
+        # Cache destination grouping for _resolve_action and action_masks
+        if legal_moves:
+            walk_mp = self._game.rl_unit.walk_mp
+            self._destinations, self._dest_lookup = _group_moves_by_destination(
+                legal_moves, walk_mp
+            )
+        else:
+            self._destinations = []
+            self._dest_lookup = {}
+
         return flatten_observation_hierarchical(
             obs_dict,
             self._rl_owner,
@@ -167,12 +181,29 @@ class MegaMekSimEnv(gymnasium.Env):
             max_destinations=self.max_destinations,
         )
 
+    def action_masks(self) -> dict:
+        """Return action masks for hierarchical action space."""
+        max_dest = self.max_destinations
+        dest_mask = np.zeros(max_dest, dtype=bool)
+        facing_mask = np.zeros((max_dest, 6), dtype=bool)
+        n = min(len(self._destinations), max_dest)
+        for i in range(n):
+            dest_mask[i] = True
+            for facing in self._destinations[i]["facing_options"]:
+                facing_mask[i, facing] = True
+        return {"dest_mask": dest_mask, "facing_mask": facing_mask}
+
     def _build_info(self, obs_dict: dict) -> dict:
         """Build info dict (vector-safe types only for AsyncVectorEnv)."""
         info: dict = {
             "n_legal_moves": self._n_legal_moves,
             "round": obs_dict.get("round", 0),
+            "action_mask": self.action_masks(),
         }
         if obs_dict.get("terminated") or obs_dict.get("truncated"):
-            info["game_outcome"] = obs_dict.get("game_outcome", "UNKNOWN")
+            outcome_str = obs_dict.get("game_outcome", "UNKNOWN")
+            info["game_outcome"] = {"WIN": 1, "LOSS": -1, "DRAW": 0}.get(
+                outcome_str, 0
+            )
+            info["game_rounds"] = obs_dict.get("round", 0)
         return info

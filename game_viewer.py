@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import copy
+import dataclasses
 import json
 import re
 import random
@@ -29,7 +30,7 @@ import gymnasium
 import numpy as np
 
 import megamek_gym  # noqa: F401 — registers the env
-from megamek_gym.agent import load_agent, select_action, OUTCOME_MAP
+from megamek_gym.agent import load_agent, load_config_from_checkpoint, load_hierarchical_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
 from megamek_gym.reward import CompositeReward
 
@@ -65,6 +66,10 @@ def parse_args():
     parser.add_argument("--show-elevation", action="store_true")
     parser.add_argument("--max-steps", type=int, default=80)
 
+    # Sim mode
+    parser.add_argument("--sim", action="store_true",
+                        help="Use Python sim instead of Java bridge (no JVM required)")
+
     # Output
     parser.add_argument("--output", type=str, default="game_viewer.html")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -73,7 +78,53 @@ def parse_args():
     return parser.parse_args()
 
 
-def play_game(env, agent, device, deterministic, max_steps):
+def _select_hierarchical(agent, obs, action_mask, device, deterministic, is_random):
+    """Select a (dest, facing) action for hierarchical action space.
+
+    Returns a numpy array [dest_idx, facing].
+    """
+    import torch
+
+    dest_mask = action_mask["dest_mask"]
+    facing_mask = action_mask["facing_mask"]
+
+    if is_random:
+        valid_dests = np.where(dest_mask)[0]
+        dest = np.random.choice(valid_dests) if len(valid_dests) > 0 else 0
+        valid_facings = np.where(facing_mask[dest])[0]
+        facing = np.random.choice(valid_facings) if len(valid_facings) > 0 else 0
+        return np.array([dest, facing])
+
+    obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
+    dm_t = torch.tensor(dest_mask, dtype=torch.bool).unsqueeze(0).to(device)
+    fm_t = torch.tensor(facing_mask, dtype=torch.bool).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        if deterministic:
+            from megamek_gym.observation import DEST_FEATURES
+
+            features = agent.feature_net(obs_t)
+            dest_logits = agent.dest_head(features)
+            dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
+            dest = dest_logits.argmax(dim=1)
+
+            off = agent.dest_block_offset
+            dest_start = off + dest * DEST_FEATURES
+            idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES, device=obs_t.device)
+            dest_feats = obs_t.gather(1, idx)
+            facing_input = torch.cat([features, dest_feats], dim=-1)
+            facing_logits = agent.facing_head(facing_input)
+            batch_fm = fm_t[torch.arange(1), dest]
+            facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
+            facing = facing_logits.argmax(dim=1)
+
+            return np.array([dest.item(), facing.item()])
+        else:
+            action, _, _, _ = agent.get_action_and_value(obs_t, dm_t, fm_t)
+            return action[0].cpu().numpy()
+
+
+def play_game(env, agent, device, deterministic, max_steps, hierarchical=False):
     """Play one game, collecting step snapshots and step log simultaneously.
 
     Returns (snapshots, step_log, outcome, game_rounds).
@@ -111,7 +162,10 @@ def play_game(env, agent, device, deterministic, max_steps):
         ))
 
     for step in range(1, max_steps + 1):
-        if agent is not None:
+        if hierarchical:
+            is_random = agent is None
+            action = _select_hierarchical(agent, obs, info["action_mask"], device, deterministic, is_random)
+        elif agent is not None:
             action = select_action(agent, obs, info["action_mask"], device, deterministic)
         else:
             action = np.random.randint(0, max(n_legal, 1))
@@ -129,7 +183,7 @@ def play_game(env, agent, device, deterministic, max_steps):
         step_log.append({
             "round": info.get("round", 0),
             "phase": info.get("phase", ""),
-            "action": int(action),
+            "action": action.tolist() if hasattr(action, 'tolist') else int(action),
             "n_legal_moves": info.get("n_legal_moves", 0),
             "reward": reward,
             "reward_details": reward_details,
@@ -164,7 +218,10 @@ def play_game(env, agent, device, deterministic, max_steps):
                 rl_owner_id=rl_owner_id,
             ))
 
-        if step <= 2 or step % 10 == 0:
+        if hierarchical:
+            n_dests = int(info["action_mask"]["dest_mask"].sum())
+            print(f"  step {step}: n_dests={n_dests}")
+        else:
             print(f"  step {step}: n_legal={n_legal}")
 
     outcome = OUTCOME_MAP.get(info.get("game_outcome", 0), "UNKNOWN")
@@ -172,7 +229,7 @@ def play_game(env, agent, device, deterministic, max_steps):
     return snapshots, step_log, outcome, game_rounds
 
 
-def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose):
+def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose, end_condition=""):
     """Build self-contained HTML with hex map + transcript side by side."""
     # Embed SVGs as JS array, making them scalable
     frames_js = []
@@ -263,6 +320,7 @@ def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose):
   .loc-internal {{ color: #f0ad4e; }}
   .prone-tag {{ color: #f0ad4e; font-weight: bold; }}
   .destroyed-tag {{ color: #d9534f; font-weight: bold; }}
+  .end-condition {{ font-weight: bold; padding: 4px 0; font-size: 14px; }}
   .outcome-bar {{
     padding: 8px; text-align: center; font-weight: bold; font-size: 15px;
     border-top: 1px solid #333;
@@ -298,6 +356,7 @@ const stepMeta = {step_meta_json};
 const roundData = {round_data_json};
 const showVerbose = {verbose_js};
 const gameOutcome = {json.dumps(outcome)};
+const endCondition = {json.dumps(end_condition)};
 
 // Build round lookup: display_round -> roundData entries
 const roundLookup = {{}};
@@ -460,6 +519,12 @@ function renderRound(rd, cutoff) {{
   // RL steps (reward breakdown) at end of round
   h += renderRLSteps(rd);
 
+  // End condition (final round only)
+  if (rd.is_final && endCondition) {{
+    h += `<div class="section-label">Game Over</div>`;
+    h += `<div class="end-condition">${{gameOutcome}} &mdash; ${{escHtml(endCondition)}}</div>`;
+  }}
+
   return h;
 }}
 
@@ -517,7 +582,7 @@ function show(i) {{
   // Outcome bar
   const bar = document.getElementById("outcome-bar");
   bar.className = 'outcome-bar outcome-' + gameOutcome;
-  bar.textContent = gameOutcome;
+  bar.textContent = endCondition ? gameOutcome + ' \u2014 ' + endCondition : gameOutcome;
 }}
 
 function goNext() {{ show(idx + 1); }}
@@ -544,59 +609,83 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    # Load config and enable saves
+    # Load config
     if args.config:
         cfg = MegaMekConfig.load(args.config)
+    elif args.checkpoint:
+        ckpt_config = load_config_from_checkpoint(args.checkpoint)
+        valid_fields = {f.name for f in dataclasses.fields(MegaMekConfig)}
+        ckpt_config = {k: v for k, v in ckpt_config.items() if k in valid_fields}
+        cfg = MegaMekConfig(**ckpt_config)
     else:
         cfg = MegaMekConfig()
-        cfg.rl_unit = "Commando COM-2D"
-        cfg.opponent_unit = "Commando COM-2D"
+        cfg.rl_unit = "Trebuchet TBT-5S" if args.sim else "Commando COM-2D"
+        cfg.opponent_unit = "Trebuchet TBT-5S" if args.sim else "Commando COM-2D"
         cfg.max_game_rounds = 40
         cfg.firing_strategy = "naive"
 
-    cfg.megamek_dir = args.megamek_dir
-    if args.port is not None:
-        cfg.rl_port = args.port
-    cfg.env_index = 0
-    cfg.max_rotating_round_saves = 100
-    cfg.save_budget_mb = 10000
-    cfg.enable_game_reports = True
-
-    env = gymnasium.make("MegaMekGym/MegaMek-v0", config=cfg)
+    if args.sim:
+        from megamek_gym.sim.env import MegaMekSimEnv
+        env = MegaMekSimEnv(
+            rl_unit=cfg.rl_unit,
+            opponent_unit=cfg.opponent_unit,
+            max_game_rounds=cfg.max_game_rounds,
+            max_destinations=getattr(cfg, "max_destinations", 125),
+            board_width=getattr(cfg, "board_width", 16) or 16,
+            board_height=getattr(cfg, "board_height", 17) or 17,
+        )
+    else:
+        cfg.megamek_dir = args.megamek_dir
+        if args.port is not None:
+            cfg.rl_port = args.port
+        cfg.env_index = 0
+        cfg.max_rotating_round_saves = 100
+        cfg.save_budget_mb = 10000
+        cfg.enable_game_reports = True
+        env = gymnasium.make("MegaMekGym/MegaMek-v0", config=cfg)
 
     # Load trained policy if provided
     agent = None
     device = None
+    hierarchical = getattr(cfg, "action_space_type", "hierarchical") == "hierarchical"
+    if args.sim:
+        hierarchical = True  # sim env is always hierarchical
     if args.checkpoint:
         obs_size = env.observation_space.shape[0]
-        action_size = env.action_space.n
-        agent, checkpoint, device = load_agent(args.checkpoint, obs_size, action_size)
+        if hierarchical:
+            max_dest = getattr(cfg, "max_destinations", 125)
+            agent, checkpoint, device = load_hierarchical_agent(
+                args.checkpoint, obs_size, max_dest
+            )
+        else:
+            action_size = env.action_space.n
+            agent, checkpoint, device = load_agent(args.checkpoint, obs_size, action_size)
         print(f"Loaded checkpoint: {args.checkpoint}")
         print(f"  global_step={checkpoint.get('global_step', '?')}, "
               f"deterministic={args.deterministic}")
 
     print(f"Playing game: {cfg.rl_unit} vs {cfg.opponent_unit}")
     print(f"  config: {args.config or 'defaults'}")
+    print(f"  mode: {'sim (Python)' if args.sim else 'Java bridge'}")
     print(f"  policy: {'checkpoint' if agent else 'random'}")
 
-    # Clear stale saves
-    port = args.port or cfg.rl_port
-    clear_saves(args.megamek_dir, port)
+    if not args.sim:
+        port = args.port or cfg.rl_port
+        clear_saves(args.megamek_dir, port)
 
     t0 = time.monotonic()
     snapshots, step_log, outcome, game_rounds = play_game(
-        env, agent, device, args.deterministic, args.max_steps
+        env, agent, device, args.deterministic, args.max_steps,
+        hierarchical=hierarchical,
     )
     elapsed = time.monotonic() - t0
 
-    print(f"\nGame: {outcome} in {game_rounds} rounds, {len(snapshots)} snapshots, "
-          f"{len(step_log)} steps ({elapsed:.1f}s)")
-
-    # Collect saves into a descriptive directory
-    output_stem = Path(args.output).stem
-    save_dir = Path(f"{output_stem}_saves_{outcome}")
-    n_saves = collect_saves(args.megamek_dir, port, save_dir)
-    print(f"Collected {n_saves} save files → {save_dir}/")
+    save_dir = None
+    if not args.sim:
+        output_stem = Path(args.output).stem
+        save_dir = Path(f"{output_stem}_saves_{outcome}")
+        n_saves = collect_saves(args.megamek_dir, port, save_dir)
+        print(f"Collected {n_saves} save files -> {save_dir}/")
 
     env.close()
 
@@ -604,61 +693,100 @@ def main():
         print("No movement snapshots collected!")
         return
 
-    # Parse saves for transcript data
-    save_files = sorted(
-        save_dir.glob("Round-*.sav.gz"),
-        key=lambda p: int(re.match(r"Round-(\d+)-", p.name).group(1)),
-    )
-    saves = [parse_save(sf) for sf in save_files]
+    # Build transcript data
+    if args.sim:
+        from transcript import build_sim_transcript
+        game = env.unwrapped._game
+        rl_label = f"{game.rl_unit.template.chassis} {game.rl_unit.template.model}"
+        opp_label = f"{game.opp_unit.template.chassis} {game.opp_unit.template.model}"
+        round_data = build_sim_transcript(game.round_log, step_log, rl_label, opp_label)
 
-    autosave_files = sorted(save_dir.glob("autosave_*.sav.gz"))
-    autosave_path = autosave_files[-1] if autosave_files else None
+        # Derive end condition from game state
+        end_condition = ""
+        if outcome == "WIN":
+            end_condition = "opponent destroyed"
+        elif outcome == "LOSS":
+            end_condition = "mech destroyed"
+        elif outcome == "DRAW":
+            if game.rl_unit.destroyed and game.opp_unit.destroyed:
+                end_condition = "mutual destruction"
+            else:
+                end_condition = f"round limit ({game.max_rounds})"
+    else:
+        save_files = sorted(
+            save_dir.glob("Round-*.sav.gz"),
+            key=lambda p: int(re.match(r"Round-(\d+)-", p.name).group(1)),
+        )
+        saves = [parse_save(sf) for sf in save_files]
+        autosave_files = sorted(save_dir.glob("autosave_*.sav.gz"))
+        autosave_path = autosave_files[-1] if autosave_files else None
+        round_data = build_round_transcript(saves, step_log, autosave_path)
+        end_condition = ""
+        if autosave_path:
+            final_save = parse_save(autosave_path)
+            end_condition = determine_end_condition(final_save["units"], outcome)
 
-    round_data = build_round_transcript(saves, step_log, autosave_path)
+    cond_str = f" ({end_condition})" if end_condition else ""
+    print(f"\nGame: {outcome}{cond_str} in {game_rounds} rounds, {len(snapshots)} snapshots, "
+          f"{len(step_log)} steps ({elapsed:.1f}s)")
 
-    # Build starting-state snapshot from the first save with deployed units.
-    # The first obs from reset() is already after Princess moved (if she won
-    # initiative), so we reconstruct the true pre-move board from save data.
-    starting_save = None
-    for s in saves:
-        if any(u.get("pos") is not None for u in s.get("units", [])):
-            starting_save = s
-            break
-
-    if starting_save and snapshots:
-        # Convert save units to raw-obs format expected by draw_units
+    # Build starting-state snapshot
+    if args.sim:
+        # Sim: use known starting positions
+        game = env.unwrapped._game
         starting_units = []
-        for u in starting_save["units"]:
-            pos = u.get("pos")
-            if pos is None:
-                continue
+        for unit in [game.rl_unit, game.opp_unit]:
             starting_units.append({
-                "x": pos[0], "y": pos[1],
-                "facing": u.get("facing", 0),
-                "owner": u.get("owner_id", -1),
-                "chassis": u["name"].split("(")[0].strip().split()[-1],
-                "destroyed": u.get("destroyed", False),
+                "x": game._rl_start[0] if unit.owner == 0 else game._opp_start[0],
+                "y": game._rl_start[1] if unit.owner == 0 else game._opp_start[1],
+                "facing": 3 if unit.owner == 0 else 0,
+                "owner": unit.owner,
+                "chassis": unit.template.chassis,
+                "model": unit.template.model,
+                "destroyed": False,
             })
-
-        # Detect rl_owner_id: the owner that matches "RLBot" in name
-        starting_rl_owner = -1
-        for u in starting_save["units"]:
-            if "RLBot" in u.get("name", ""):
-                starting_rl_owner = u.get("owner_id", -1)
+        if snapshots:
+            starting_snap = StepSnapshot(
+                step_idx=-1, game_round=0, phase="STARTING",
+                board=copy.deepcopy(snapshots[0].board),
+                units=starting_units, legal_moves=[], n_legal=0,
+                rl_owner_id=0,
+            )
+            snapshots.insert(0, starting_snap)
+    else:
+        starting_save = None
+        for s in saves:
+            if any(u.get("pos") is not None for u in s.get("units", [])):
+                starting_save = s
                 break
 
-        # Use board from first real snapshot (save files don't include board hex data)
-        starting_snap = StepSnapshot(
-            step_idx=-1,
-            game_round=0,
-            phase="STARTING",
-            board=copy.deepcopy(snapshots[0].board),
-            units=starting_units,
-            legal_moves=[],
-            n_legal=0,
-            rl_owner_id=starting_rl_owner,
-        )
-        snapshots.insert(0, starting_snap)
+        if starting_save and snapshots:
+            starting_units = []
+            for u in starting_save["units"]:
+                pos = u.get("pos")
+                if pos is None:
+                    continue
+                starting_units.append({
+                    "x": pos[0], "y": pos[1],
+                    "facing": u.get("facing", 0),
+                    "owner": u.get("owner_id", -1),
+                    "chassis": u["name"].split("(")[0].strip().split()[-1],
+                    "destroyed": u.get("destroyed", False),
+                })
+
+            starting_rl_owner = -1
+            for u in starting_save["units"]:
+                if "RLBot" in u.get("name", ""):
+                    starting_rl_owner = u.get("owner_id", -1)
+                    break
+
+            starting_snap = StepSnapshot(
+                step_idx=-1, game_round=0, phase="STARTING",
+                board=copy.deepcopy(snapshots[0].board),
+                units=starting_units, legal_moves=[], n_legal=0,
+                rl_owner_id=starting_rl_owner,
+            )
+            snapshots.insert(0, starting_snap)
 
     # Build step metadata for JS
     step_meta = []
@@ -668,8 +796,7 @@ def main():
             "phase": snap.phase,
         })
 
-    # Auto-detect walk MP from a snapshot with full unit data (not the
-    # synthetic starting snapshot whose units lack mp_walk)
+    # Auto-detect walk MP from a snapshot with full unit data
     walk_mp = 4
     for snap in snapshots:
         if any("mp_walk" in u for u in snap.units):
@@ -684,12 +811,13 @@ def main():
 
     # Generate HTML
     title = f"Game Viewer - {cfg.rl_unit} vs {cfg.opponent_unit}"
-    html = build_combined_html(svgs, step_meta, round_data, outcome, title, args.verbose)
+    html = build_combined_html(svgs, step_meta, round_data, outcome, title, args.verbose, end_condition)
 
     with open(args.output, "w") as f:
         f.write(html)
     print(f"Saved to {args.output}")
-    print(f"Save files: {save_dir}/")
+    if save_dir:
+        print(f"Save files: {save_dir}/")
 
     # Open in browser (WSL2-aware)
     import os

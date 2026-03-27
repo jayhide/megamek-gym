@@ -61,6 +61,10 @@ class Game:
         # (avoids re-enumerating in step())
         self._cached_rl_moves: list[dict] = []
 
+        # Round event log for transcript/game viewer
+        self.round_log: list[dict] = []
+        self._last_initiative: dict = {}
+
     @property
     def los_table(self) -> LosTable:
         if self._los_table is None:
@@ -93,6 +97,9 @@ class Game:
         self.prev_round_enemy_y = -1
         self.prev_round_enemy_facing = -1
 
+        self.round_log = []
+        self._last_initiative = {}
+
         self._roll_initiative()
         return self._build_observation()
 
@@ -116,15 +123,15 @@ class Game:
         # Enumerate opponent moves
         opp_moves = enumerate_moves(self.opp_unit, self.board, self.rl_unit)
 
-        # Move order based on initiative
+        # Move order based on initiative — capture movement info
         if self.rl_moves_first:
-            self._execute_move(self.rl_unit, rl_moves, action)
+            rl_move_info = self._execute_move(self.rl_unit, rl_moves, action)
             opp_action = self._select_opponent_move(opp_moves)
-            self._execute_move(self.opp_unit, opp_moves, opp_action)
+            opp_move_info = self._execute_move(self.opp_unit, opp_moves, opp_action)
         else:
             opp_action = self._select_opponent_move(opp_moves)
-            self._execute_move(self.opp_unit, opp_moves, opp_action)
-            self._execute_move(self.rl_unit, rl_moves, action)
+            opp_move_info = self._execute_move(self.opp_unit, opp_moves, opp_action)
+            rl_move_info = self._execute_move(self.rl_unit, rl_moves, action)
 
         # Capture post-movement enemy position
         self.prev_round_enemy_x = self.opp_unit.x
@@ -132,16 +139,21 @@ class Game:
         self.prev_round_enemy_facing = self.opp_unit.facing
 
         # Firing phase (simultaneous)
-        self._resolve_firing()
+        rl_firing, opp_firing = self._resolve_firing()
 
         if self._check_game_end():
+            self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing)
             return self._build_terminal_observation()
 
         # Heat phase
         self._resolve_heat()
 
         if self._check_game_end():
+            self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing)
             return self._build_terminal_observation()
+
+        # Log this round's events before advancing
+        self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing)
 
         # End of round
         self.rl_unit.clear_turn_state()
@@ -156,20 +168,43 @@ class Game:
         self._roll_initiative()
         return self._build_observation()
 
+    def _append_round_log(
+        self,
+        rl_move_info: dict | None,
+        opp_move_info: dict | None,
+        rl_firing: dict,
+        opp_firing: dict,
+    ) -> None:
+        self.round_log.append({
+            "round": self.round,
+            "initiative": dict(self._last_initiative),
+            "rl_moves_first": self.rl_moves_first,
+            "rl_movement": rl_move_info,
+            "opp_movement": opp_move_info,
+            "rl_firing": rl_firing,
+            "opp_firing": opp_firing,
+            "unit_states": [self.rl_unit.to_obs_dict(), self.opp_unit.to_obs_dict()],
+        })
+
     def _roll_initiative(self) -> None:
         while True:
             rl_roll = d6(1, self.rng)
             opp_roll = d6(1, self.rng)
             if rl_roll != opp_roll:
                 self.rl_moves_first = rl_roll < opp_roll
+                self._last_initiative = {
+                    "rl_roll": rl_roll,
+                    "opp_roll": opp_roll,
+                }
                 return
 
-    def _execute_move(self, unit: Unit, moves: list[dict], action: int) -> None:
+    def _execute_move(self, unit: Unit, moves: list[dict], action: int) -> dict | None:
         if not moves or action < 0:
-            return
+            return None
 
         move = moves[action]
         old_x, old_y = unit.x, unit.y
+        was_prone = unit.prone
 
         unit.x = move["dest_x"]
         unit.y = move["dest_y"]
@@ -190,6 +225,18 @@ class Game:
         if unit.prone and unit.mp_used > 0:
             unit.prone = False
 
+        return {
+            "entity_id": unit.entity_id,
+            "owner": unit.owner,
+            "name": f"{unit.template.chassis} {unit.template.model}",
+            "from_pos": (old_x, old_y),
+            "to_pos": (unit.x, unit.y),
+            "facing": unit.facing,
+            "movement_type": unit.movement_type,
+            "prone": unit.prone,
+            "was_prone": was_prone,
+        }
+
     def _select_opponent_move(self, moves: list[dict]) -> int:
         if not moves:
             return 0
@@ -198,9 +245,9 @@ class Game:
             self.board, self.board_hexes, self.los_table,
         )
 
-    def _resolve_firing(self) -> None:
+    def _resolve_firing(self) -> tuple[dict, dict]:
         if self.rl_unit.destroyed or self.opp_unit.destroyed:
-            return
+            return {}, {}
 
         rl_result = resolve_firing(
             self.rl_unit, self.opp_unit, self.board, self.los_table, self.rng
@@ -211,6 +258,8 @@ class Game:
 
         apply_heat(self.rl_unit, rl_result["heat_generated"])
         apply_heat(self.opp_unit, opp_result["heat_generated"])
+
+        return rl_result, opp_result
 
     def _resolve_heat(self) -> None:
         for unit in (self.rl_unit, self.opp_unit):

@@ -1029,6 +1029,245 @@ def build_round_transcript(saves: list[dict], step_log: list[dict],
     return rounds
 
 
+# ---------------------------------------------------------------------------
+# Sim transcript builder — converts Python sim round_log to the same format
+# as build_round_transcript() without needing Java save files.
+# ---------------------------------------------------------------------------
+
+_SIM_FACING_NAMES = ["N", "NE", "SE", "S", "SW", "NW"]
+
+_SIM_MOVE_TYPE_MAP = {
+    "walk": "walked",
+    "run": "ran",
+    "none": "stood still",
+}
+
+
+def _sim_unit_status(obs_dict: dict) -> dict:
+    """Convert a sim unit's to_obs_dict() output to armor_summary_structured format."""
+    armor_locs = obs_dict.get("armor", [])
+    total_armor = 0
+    total_armor_max = 0
+    total_internal = 0
+    total_internal_max = 0
+    damaged_locs = []
+
+    for loc_data in armor_locs:
+        loc_name = loc_data["location"]
+        a = loc_data["armor"]
+        a_max = loc_data["armor_max"]
+        s = loc_data["internal"]
+        s_max = loc_data["internal_max"]
+        rear = loc_data.get("rear_armor", 0)
+        rear_max = loc_data.get("rear_armor_max", 0)
+
+        total_armor += a + rear
+        total_armor_max += a_max + rear_max
+        total_internal += s
+        total_internal_max += s_max
+
+        if a < a_max or rear < rear_max:
+            damaged_locs.append({
+                "loc": loc_name, "type": "armor",
+                "current": a + rear, "max": a_max + rear_max,
+            })
+        if s < s_max:
+            damaged_locs.append({
+                "loc": loc_name, "type": "internal",
+                "current": s, "max": s_max,
+                "destroyed": s == 0,
+            })
+
+    pct = (total_armor / total_armor_max * 100) if total_armor_max > 0 else 0
+    name = f"{obs_dict.get('chassis', '?')} {obs_dict.get('model', '?')}"
+
+    return {
+        "name": name,
+        "armor_current": total_armor,
+        "armor_max": total_armor_max,
+        "pct": round(pct, 1),
+        "internal_current": total_internal,
+        "internal_max": total_internal_max,
+        "heat": obs_dict.get("heat", 0),
+        "prone": obs_dict.get("prone", False),
+        "destroyed": obs_dict.get("destroyed", False),
+        "damaged_locs": damaged_locs,
+    }
+
+
+def _sim_movement(move_info: dict | None) -> dict | None:
+    """Convert a game.py movement event to transcript movement dict."""
+    if move_info is None:
+        return None
+    facing_idx = move_info["facing"]
+    facing_str = _SIM_FACING_NAMES[facing_idx] if 0 <= facing_idx < 6 else "?"
+    move_type = _SIM_MOVE_TYPE_MAP.get(move_info["movement_type"], move_info["movement_type"])
+
+    prone_change = None
+    if move_info["prone"] and not move_info["was_prone"]:
+        prone_change = "fell"
+    elif not move_info["prone"] and move_info["was_prone"]:
+        prone_change = "stood"
+
+    return {
+        "name": move_info["name"],
+        "from_pos": list(move_info["from_pos"]),
+        "to_pos": list(move_info["to_pos"]),
+        "facing": facing_str,
+        "move_type": move_type,
+        "prone_change": prone_change,
+    }
+
+
+def _sim_combat(firing_result: dict, attacker_label: str, target_label: str) -> list[dict]:
+    """Convert resolve_firing() result to transcript combat dicts."""
+    if not firing_result:
+        return []
+    combat = []
+    for h in firing_result.get("hits", []):
+        entry = {
+            "attacker": attacker_label,
+            "weapon": h["weapon"],
+            "target": target_label,
+            "tohit": str(h["tn"]),
+            "roll": str(h["roll"]),
+            "result": "HIT" if h["hit"] else "MISS",
+            "location": h.get("location"),
+            "missiles": h.get("missiles"),
+        }
+        combat.append(entry)
+    return combat
+
+
+def _sim_damage(firing_result: dict, target_label: str) -> list[dict]:
+    """Derive damage entries from firing result hits."""
+    if not firing_result:
+        return []
+    damage = []
+    for h in firing_result.get("hits", []):
+        if not h["hit"]:
+            continue
+        loc = h.get("location", "multiple")
+        dmg = h.get("damage", 0)
+        if dmg:
+            damage.append({
+                "entity": target_label,
+                "amount": str(dmg),
+                "location": loc if loc else "multiple",
+            })
+    return damage
+
+
+def build_sim_transcript(round_log: list[dict], step_log: list[dict],
+                         rl_label: str, opp_label: str) -> list[dict]:
+    """Build transcript from Python sim round_log.
+
+    Produces the same list-of-dicts format as build_round_transcript().
+
+    Args:
+        round_log: Game.round_log — per-round events from the sim.
+        step_log: Per-step dicts with round, reward, etc.
+        rl_label: Display name for RL unit (e.g. "Trebuchet TBT-5S").
+        opp_label: Display name for opponent unit.
+    """
+    # Group step_log by round
+    steps_by_round: dict[int, list[dict]] = {}
+    for s in step_log:
+        steps_by_round.setdefault(s["round"], []).append(s)
+
+    rounds = []
+
+    # Starting state (round 0) — use first round's pre-movement positions
+    if round_log:
+        first = round_log[0]
+        starting_status = []
+        # Use unit_states from the first round (post-round), but for starting
+        # state we want pre-combat, so just show full health labels
+        for u in first["unit_states"]:
+            starting_status.append(_sim_unit_status(u))
+
+        init = first["initiative"]
+        rl_name = f"{rl_label} (RLBot)"
+        opp_name = f"{opp_label} (Princess)"
+        starting_initiative = {
+            "rolls": {rl_name: init["rl_roll"], opp_name: init["opp_roll"]},
+            "first_mover": rl_name if first["rl_moves_first"] else opp_name,
+            "first_mover_id": 0 if first["rl_moves_first"] else 1,
+        }
+
+        rounds.append({
+            "display_round": 0,
+            "is_starting": True,
+            "initiative": starting_initiative,
+            "first_movement": [],
+            "second_movement": [],
+            "combat": [],
+            "damage": [],
+            "unit_status": starting_status,
+            "rl_steps": [],
+        })
+
+    # Per-round entries
+    for i, entry in enumerate(round_log):
+        game_round = entry["round"]
+        init = entry["initiative"]
+        rl_name = f"{rl_label} (RLBot)"
+        opp_name = f"{opp_label} (Princess)"
+
+        initiative = {
+            "rolls": {rl_name: init["rl_roll"], opp_name: init["opp_roll"]},
+            "first_mover": rl_name if entry["rl_moves_first"] else opp_name,
+            "first_mover_id": 0 if entry["rl_moves_first"] else 1,
+        }
+
+        rl_move = _sim_movement(entry["rl_movement"])
+        opp_move = _sim_movement(entry["opp_movement"])
+
+        if entry["rl_moves_first"]:
+            first_movement = [rl_move] if rl_move else []
+            second_movement = [opp_move] if opp_move else []
+        else:
+            first_movement = [opp_move] if opp_move else []
+            second_movement = [rl_move] if rl_move else []
+
+        # Combat
+        combat = (
+            _sim_combat(entry["rl_firing"], rl_name, opp_name)
+            + _sim_combat(entry["opp_firing"], opp_name, rl_name)
+        )
+
+        # Damage
+        damage = (
+            _sim_damage(entry["rl_firing"], opp_name)
+            + _sim_damage(entry["opp_firing"], rl_name)
+        )
+
+        # Unit status after this round
+        unit_status = [_sim_unit_status(u) for u in entry["unit_states"]]
+
+        # RL steps: step_log tags with resulting obs round (game_round + 1)
+        rl_steps = _build_rl_steps(steps_by_round.get(game_round + 1, []))
+        if not rl_steps:
+            rl_steps = _build_rl_steps(steps_by_round.get(game_round, []))
+
+        rd = {
+            "display_round": game_round,
+            "initiative": initiative,
+            "first_movement": first_movement,
+            "second_movement": second_movement,
+            "combat": combat,
+            "damage": damage,
+            "unit_status": unit_status,
+            "rl_steps": rl_steps,
+        }
+        if i == len(round_log) - 1:
+            rd["is_final"] = True
+
+        rounds.append(rd)
+
+    return rounds
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate transcript from MegaMek save files")
     parser.add_argument("save_dir", type=Path, help="Directory containing .sav.gz files")
