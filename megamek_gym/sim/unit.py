@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import NamedTuple
@@ -244,6 +245,10 @@ class Unit:
     engine_hits: int = 0
     gyro_hits: int = 0
 
+    # Leg actuator damage (index 0=RL, 1=LL)
+    hip_hits: list = field(default_factory=lambda: [False, False])
+    leg_actuator_hits: list = field(default_factory=lambda: [0, 0])
+
     def __post_init__(self) -> None:
         if not self.armor:
             self.reset_state()
@@ -268,6 +273,8 @@ class Unit:
         self.mp_used = 0
         self.engine_hits = 0
         self.gyro_hits = 0
+        self.hip_hits = [False, False]
+        self.leg_actuator_hits = [0, 0]
 
     def deploy(self, x: int, y: int, facing: int) -> None:
         self.x = x
@@ -280,13 +287,20 @@ class Unit:
 
     @property
     def walk_mp(self) -> int:
-        """Current walk MP (reduced by leg damage)."""
+        """Current walk MP (reduced by leg damage).
+
+        Matches Java BipedMek.getWalkMP():
+        - Destroyed leg: MP = 0
+        - Hip destroyed: MP = ceil(MP / 2) (applied per leg, sequentially)
+        - Each non-hip actuator crit (upper leg, lower leg, foot): MP -= 1
+        """
         mp = self.template.walk_mp
-        # Hip crit reduces MP
-        # For simplicity: each destroyed leg reduces walk MP by 1
-        for loc in (Location.RL, Location.LL):
+        for i, loc in enumerate((Location.RL, Location.LL)):
             if self.loc_destroyed[loc]:
-                mp = max(0, mp - 999)  # Can't walk with destroyed leg
+                return 0
+            if self.hip_hits[i]:
+                mp = math.ceil(mp / 2)
+            mp -= self.leg_actuator_hits[i]
         return max(0, mp)
 
     @property

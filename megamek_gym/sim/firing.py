@@ -347,12 +347,18 @@ def _apply_critical(target: Unit, loc: Location,
     ammo_indices = [i for i, a in enumerate(target.template.ammo)
                     if a.location == loc and target.ammo_remaining[i] > 0]
 
-    # System crits (gyro in CT, engine in CT/RT/LT)
+    # System crits (gyro in CT, engine in CT/RT/LT, actuators in legs)
     system_options: list[str] = []
     if loc == Location.CT:
         system_options.extend(["gyro", "engine"])
     elif loc in (Location.RT, Location.LT):
         system_options.append("engine")
+    elif loc in (Location.RL, Location.LL):
+        leg_idx = 0 if loc == Location.RL else 1
+        if not target.hip_hits[leg_idx]:
+            system_options.append("hip")
+        if target.leg_actuator_hits[leg_idx] < 3:
+            system_options.append("leg_actuator")
 
     all_options = (
         [("weapon", i) for i in weapon_indices]
@@ -393,6 +399,12 @@ def _apply_critical(target: Unit, loc: Location,
             # 1 gyro hit: harder piloting, 2 = fall
             if target.gyro_hits >= 2:
                 target.prone = True
+        elif crit_idx == "hip":
+            leg_idx = 0 if loc == Location.RL else 1
+            target.hip_hits[leg_idx] = True
+        elif crit_idx == "leg_actuator":
+            leg_idx = 0 if loc == Location.RL else 1
+            target.leg_actuator_hits[leg_idx] = min(3, target.leg_actuator_hits[leg_idx] + 1)
 
 
 def _destroy_location(target: Unit, loc: Location) -> None:

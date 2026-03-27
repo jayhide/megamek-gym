@@ -70,7 +70,7 @@ while True:
 
 ## Known Simplifications vs Java MegaMek
 
-- **Critical hits**: Random equipment in location rather than numbered slot table
+- **Critical hits**: Random equipment in location rather than numbered slot table. Leg locations can roll hip or non-hip actuator crits (tracked per-leg), reducing walk MP.
 - **Princess AI**: Heuristic scoring rather than full Princess path ranking
 - **LOS**: Simplified hex-line trace rather than MegaMek's full LOS algorithm
 - **PSR**: Only checks running-in-heavy-woods and elevation-change-≥2 triggers
@@ -120,5 +120,5 @@ poetry run python validate_sim.py --megamek-dir ../megamek --only legal_moves --
 ### Current status (known divergences)
 
 - **LOS**: ~2% mismatch rate. Remaining mismatches are from hex line tracing differences (cube-coordinate interpolation vs Java's geometric intersection). The accumulated woods threshold (≥3 points), foliage height (hexEl+2), elevation gating (strict `>`), and divided-line handling all match Java.
-- **Legal moves**: ~97% hex match rate, 0 java-only hexes for standing movement. Remaining differences: walk/run variant counting (Java keeps both walk and run paths to same destination more aggressively), prone movement with damaged legs (sim doesn't model actuator damage reducing MP), and minor MP cost differences from BFS path selection order.
+- **Legal moves**: ~97% hex match rate, 0 java-only hexes for standing movement. Remaining differences: walk/run variant counting (Java keeps both walk and run paths to same destination more aggressively via multi-path deque storage), heat effects on movement (high heat reduces MP in Java but not in the sim), BFS dedup priority ordering (Python prefers lower MP, Java's isBetterPath prefers more hexes moved for TMM), and minor MP cost differences from BFS path selection order. Leg actuator damage now reduces MP matching Java's BipedMek.getWalkMP() (hip = halve MP, each non-hip actuator crit = -1 MP).
 - Board, unit template, distances, to-hit components, damage consistency, heat consistency all **pass**.
