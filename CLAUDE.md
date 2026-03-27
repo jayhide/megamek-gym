@@ -6,23 +6,40 @@ Gymnasium-compatible reinforcement learning environment for MegaMek (BattleTech 
 
 ```bash
 poetry install
-poetry run pytest                # unit tests
-poetry run python smoke_test.py --megamek-dir ../megamek --port 9999  # integration test
+poetry run pytest                # unit tests only (fast, no JVM needed)
 ```
 
 Always use `poetry run python` instead of bare `python`.
 
-## Smoke Test
+## Testing
 
-**Always run after changes to the RL bridge (Python or Java side):**
+All tests are unified under pytest with markers. **Run after any non-trivial code change:**
 
 ```bash
-poetry run python smoke_test_all.py --megamek-dir ../megamek
+# Unit tests only (fast, no JVM) — default
+poetry run pytest
+
+# Integration smoke tests (require JVM, ~2-3 min)
+poetry run pytest -m integration --megamek-dir ../megamek
+
+# Sim-vs-Java cross-validation (require JVM)
+poetry run pytest -m validation --megamek-dir ../megamek
+
+# Everything (unit + integration + validation)
+poetry run pytest -m "" --megamek-dir ../megamek
+
+# Useful options
+poetry run pytest -m integration --megamek-dir ../megamek -v          # verbose
+poetry run pytest -m integration --megamek-dir ../megamek --port 9999  # custom port
+poetry run pytest -m validation --megamek-dir ../megamek --random-actions  # better for damage/heat
 ```
 
-Tests: basic episode, truncation signal, termination signal, persistent reset, Python-vs-Java cross-validation. ~2-3 min. Exit 0 = all pass. Use `--verbose` for per-step output.
+**Markers:**
+- *(no marker)* — unit tests: config, observation, reward, early termination, heat MP. No JVM needed.
+- `integration` — smoke tests: basic episode, truncation, termination, persistent reset, cross-validation, auto-wake, fixed deployment, board consistency, pilot stats, hierarchical actions, feature distributions. Each launches its own JVM.
+- `validation` — sim cross-validation: board, unit template, LOS, legal moves, distances, to-hit, damage, heat, statistical. Shares a single Java game trace (session-scoped fixture).
 
-The older `smoke_test.py` and `smoke_test_truncation.py` are kept for quick manual debugging but are superseded by `smoke_test_all.py`.
+The standalone scripts `smoke_test_all.py` and `validate_sim.py` are kept for manual debugging but the pytest wrappers (`tests/test_smoke.py`, `tests/test_sim_validation.py`) are the canonical way to run these tests.
 
 ## Architecture
 
@@ -113,10 +130,13 @@ bench_sim.py             # Profile sim latency (per-phase breakdown) and memory 
 validate_sim.py          # Cross-validate Python sim against Java MegaMek (tiered tests)
 
 tests/
+├── conftest.py               # Shared fixtures: --megamek-dir, --port, java_trace
 ├── test_config.py            # Config parsing, validation, and YAML roundtrip tests
 ├── test_cross_validation.py  # Python-vs-Java cross-validation (hex distance, firing arcs)
 ├── test_observation.py       # Observation flattening correctness tests
 ├── test_reward.py            # Reward function logic tests
+├── test_smoke.py             # @integration: pytest wrappers for smoke_test_all.py (11 tests)
+├── test_sim_validation.py    # @validation: pytest wrappers for validate_sim.py (9 tests)
 └── sim_validation/           # Sim-vs-Java cross-validation suite
     ├── collector.py          # Run Java game, collect per-step observation traces
     ├── reconstruct.py        # Build sim.Unit from Java observation dict
