@@ -12,6 +12,7 @@ from megamek_gym.observation import (
     GLOBAL_FEATURES,
     MOVE_FEATURES,
     OBS_SIZE,
+    TACTICAL_FEATURES,
     UNIT_FEATURES,
     _group_moves_by_destination,
     compute_obs_size,
@@ -38,6 +39,7 @@ def _make_unit(owner, unit_id=1, x=5, y=7, facing=2, **kwargs):
         "prone": False,
         "destroyed": False,
         "deployed": True,
+        "crit_state": {"engine_hits": 0, "gyro_hits": 0, "sensor_hits": 0},
         "armor": [
             {
                 "location": "CT",
@@ -256,7 +258,7 @@ class TestMoveFeatures:
 
     def test_obs_size_with_moves(self):
         size = compute_obs_size(16, 17, max_legal_moves=1000)
-        assert size == BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + 1000 * MOVE_FEATURES
+        assert size == BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES + 1000 * MOVE_FEATURES
 
     def test_backward_compat_no_moves(self):
         """Without max_legal_moves, obs size is unchanged."""
@@ -270,7 +272,7 @@ class TestMoveFeatures:
 
     def test_kinematic_feature_values(self):
         flat = self._flat_with_moves()
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
 
         # Move 0: dest_x=5, dest_y=6, facing=2, mp_used=1
         assert flat[move_offset] == pytest.approx(5 / 16)
@@ -288,7 +290,7 @@ class TestMoveFeatures:
     def test_padding_zeros(self):
         """Unused move slots should be all zeros."""
         flat = self._flat_with_moves()
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # Moves 2..9 should be zeros (only 2 legal moves)
         pad_start = move_offset + 2 * MOVE_FEATURES
         pad_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
@@ -303,7 +305,7 @@ class TestMoveFeatures:
             legal_moves=[],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         move_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
         np.testing.assert_array_equal(flat[move_offset:move_end], 0.0)
 
@@ -318,7 +320,7 @@ class TestMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         assert flat[move_offset] == pytest.approx(3 / 16)
         assert flat[move_offset + 1] == pytest.approx(4 / 17)
         assert flat[move_offset + 2] == pytest.approx(0 / 5.0)
@@ -351,7 +353,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         expected_dist = hex_distance(5, 6, 10, 12)
         max_dim = 16 + 17
         assert flat[move_offset + 4] == pytest.approx(expected_dist / max_dim)
@@ -370,7 +372,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         dist = hex_distance(5, 6, 7, 7)
         raw_rq = range_quality(
             obs["units"][0], dist,
@@ -392,7 +394,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         dist = hex_distance(5, 6, 7, 7)
         raw_rq = range_quality(
             obs["units"][1], dist,
@@ -414,7 +416,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # Move 0 dest (5,6) is Light Woods → cover_value=1.0, normalized /2.0 = 0.5
         assert flat[move_offset + 7] == pytest.approx(0.5)
         # Move 1 dest (6,7) has no terrain → 0.0
@@ -433,7 +435,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # Move 0 dest (5,6) elev=3, enemy (10,12) elev=1 → diff=2, /10 = 0.2
         assert flat[move_offset + 8] == pytest.approx(0.2)
 
@@ -445,7 +447,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # Move 0 has_los=True → 1.0
         assert flat[move_offset + 9] == pytest.approx(1.0)
         # Move 1 has_los=False → 0.0
@@ -464,7 +466,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         assert flat[move_offset + 9] == pytest.approx(0.0)
 
     def test_tactical_features_no_enemy(self):
@@ -476,7 +478,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # All 6 tactical features should be 0.0 (dist, range_quality, enemy_range_quality, cover, elev_diff, has_los)
         for feat_idx in range(4, 10):
             assert flat[move_offset + feat_idx] == 0.0
@@ -489,7 +491,7 @@ class TestTacticalMoveFeatures:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # Slots 2..9 should be all zeros
         pad_start = move_offset + 2 * MOVE_FEATURES
         pad_end = move_offset + self.MAX_MOVES * MOVE_FEATURES
@@ -519,7 +521,7 @@ class TestFeatureBounds:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         dist_feat = flat[move_offset + 4]
         assert 0.0 < dist_feat <= 1.0, f"dist_to_enemy={dist_feat} exceeds [0, 1]"
 
@@ -533,7 +535,7 @@ class TestFeatureBounds:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         rl_rq = flat[move_offset + 5]
         enemy_rq = flat[move_offset + 6]
         assert 0.0 <= rl_rq <= 1.0, f"rl_range_quality={rl_rq} out of [0, 1]"
@@ -554,7 +556,7 @@ class TestFeatureBounds:
             legal_moves=obs["legal_moves"],
             max_legal_moves=self.MAX_MOVES,
         )
-        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         rl_rq = flat[move_offset + 5]
         # Raw rq is [-0.5, -0.25] (arc penalty on rear weapons), normalized to [0.0, ~0.17]
         assert 0.0 <= rl_rq <= 0.2, f"out-of-range rq should be near 0, got {rl_rq}"
@@ -695,7 +697,7 @@ class TestHierarchicalObservation:
     def test_obs_size(self):
         """compute_obs_size_hierarchical returns correct size."""
         size = compute_obs_size_hierarchical(16, 17, self.MAX_DEST)
-        expected = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + \
+        expected = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES + \
             self.MAX_DEST * DEST_FEATURES + self.MAX_DEST * 6 * FACING_FEATURES
         assert size == expected
 
@@ -710,14 +712,15 @@ class TestHierarchicalObservation:
         assert flat.dtype == np.float32
 
     def test_base_blocks_match_flat(self):
-        """Board + unit + global blocks are identical to flat version."""
+        """Board + unit + global + tactical blocks are identical to flat version."""
         obs = self._make_hierarchical_obs()
-        flat = flatten_observation(obs, rl_owner_id=0)
+        flat = flatten_observation(obs, rl_owner_id=0,
+                                  legal_moves=obs["legal_moves"])
         hier = flatten_observation_hierarchical(
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        base_size = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        base_size = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         np.testing.assert_array_equal(hier[:base_size], flat[:base_size])
 
     def test_dest_feature_values(self):
@@ -727,7 +730,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
 
         # Dest 0: stand-still at (5,7), mp_used=0
         d0 = hier[base:base + DEST_FEATURES]
@@ -754,7 +757,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         # Slots 3..MAX_DEST-1 should be zero
         unused_start = base + 3 * DEST_FEATURES
         unused_end = base + self.MAX_DEST * DEST_FEATURES
@@ -767,7 +770,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
                          + self.MAX_DEST * DEST_FEATURES)
 
         # Dest 0 (stand-still at (5,7) facing 2): only facing 2 should be filled
@@ -797,7 +800,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
                          + self.MAX_DEST * DEST_FEATURES)
         # Destinations 3..MAX_DEST-1 should have all-zero facing features
         unused_start = facing_offset + 3 * 6 * FACING_FEATURES
@@ -811,7 +814,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         assert np.all(hier[base:] == 0.0)
 
     def test_facing_head_receives_correct_dest_features(self):
@@ -881,7 +884,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
 
         # All 3 destinations should have enemy_range_quality at index 7
         # (enemy is at (10,12) facing 4 — values depend on distance but should be set)
@@ -897,7 +900,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        base = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
         facing_offset = base + self.MAX_DEST * DEST_FEATURES
 
         for dest_idx in range(3):
@@ -923,7 +926,7 @@ class TestHierarchicalObservation:
             obs, rl_owner_id=0, max_destinations=self.MAX_DEST,
             legal_moves=obs["legal_moves"],
         )
-        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        facing_offset = (BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
                          + self.MAX_DEST * DEST_FEATURES)
 
         assert FACING_FEATURES == 1, "This test assumes FACING_FEATURES == 1"

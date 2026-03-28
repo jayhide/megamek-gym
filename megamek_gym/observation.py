@@ -19,17 +19,18 @@ INCLUDE_BOARD_ELEVATION = False
 BOARD_WIDTH = 16
 BOARD_HEIGHT = 17
 BOARD_SIZE = BOARD_WIDTH * BOARD_HEIGHT if INCLUDE_BOARD_ELEVATION else 0
-UNIT_FEATURES = 55
+UNIT_FEATURES = 60
 DEST_FEATURES = 9 # Multi-Discrete Mode
 FACING_FEATURES = 1 # Multi-Discrete Mode
 GLOBAL_FEATURES = 1  # rl_moves_first
+TACTICAL_FEATURES = 6  # hex_distance, rl_range_quality, enemy_range_quality, has_los, relative_elev, round
 MOVE_FEATURE_NAMES = [
     "dest_x", "dest_y", "facing", "mp_used",
     "dist_to_enemy", "range_quality", "enemy_range_quality",
     "terrain_cover", "elevation_diff", "has_los",
 ]
 MOVE_FEATURES = len(MOVE_FEATURE_NAMES)
-OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES  # 383 (without move features)
+OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES  # 121 (without move features)
 
 
 def _board_block_size(board_width: int, board_height: int) -> int:
@@ -43,7 +44,7 @@ def compute_obs_size(board_width: int, board_height: int, max_legal_moves: int =
     When max_legal_moves > 0, includes a block of move features
     (max_legal_moves * MOVE_FEATURES) appended after the unit features.
     """
-    return _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES + max_legal_moves * MOVE_FEATURES
+    return _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES + max_legal_moves * MOVE_FEATURES
 
 
 def compute_obs_size_hierarchical(board_width: int, board_height: int, max_destinations: int) -> int:
@@ -51,7 +52,7 @@ def compute_obs_size_hierarchical(board_width: int, board_height: int, max_desti
 
     Layout: [board elevations] + 2 units + global + dest features + facing features.
     """
-    base = _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+    base = _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
     return base + max_destinations * DEST_FEATURES + max_destinations * 6 * FACING_FEATURES
 
 MAX_ARMOR_LOCATIONS = 8
@@ -75,12 +76,17 @@ def flatten_observation(
     result = np.zeros(obs_size, dtype=np.float32)
 
     board = obs.get("board", {})
+    board_hexes = board.get("hexes", [])
+
+    # Build elevation map once for efficient lookup
+    elev_map: dict[tuple[int, int], float] = {}
+    for h in board_hexes:
+        elev_map[(h["x"], h["y"])] = h.get("elevation", 0)
 
     # Board block: elevation per hex, row-major, normalized by /10
     # (disabled when INCLUDE_BOARD_ELEVATION is False — see module docstring)
     if INCLUDE_BOARD_ELEVATION:
-        hexes = board.get("hexes", [])
-        for h in hexes:
+        for h in board_hexes:
             x, y = h["x"], h["y"]
             if 0 <= x < board_width and 0 <= y < board_height:
                 idx = y * board_width + x
@@ -99,19 +105,37 @@ def flatten_observation(
     # Encode units
     offset = _board_block_size(board_width, board_height)
     if rl_unit is not None:
-        _encode_unit(result, offset, rl_unit, board_width, board_height)
+        _encode_unit(result, offset, rl_unit, board_width, board_height,
+                     board_hexes=board_hexes, elev_map=elev_map)
     offset += UNIT_FEATURES
     if enemy_unit is not None:
-        _encode_unit(result, offset, enemy_unit, board_width, board_height)
+        _encode_unit(result, offset, enemy_unit, board_width, board_height,
+                     board_hexes=board_hexes, elev_map=elev_map)
     offset += UNIT_FEATURES
 
     # Global features
     result[offset] = float(obs.get("rl_moves_first", False))
     offset += GLOBAL_FEATURES
 
+    # Tactical features (relational, computed from both units + board)
+    has_los_current = obs.get("has_los_current")
+    if has_los_current is None and legal_moves and rl_unit and rl_unit.get("x", -1) >= 0:
+        rl_x, rl_y = rl_unit["x"], rl_unit["y"]
+        for m in legal_moves:
+            if m.get("dest_x") == rl_x and m.get("dest_y") == rl_y:
+                has_los_current = m.get("has_los", False)
+                break
+    _encode_tactical_features(
+        result, offset,
+        rl_unit=rl_unit, enemy_unit=enemy_unit,
+        elev_map=elev_map, board_width=board_width, board_height=board_height,
+        game_round=obs.get("round", 0),
+        has_los_current=bool(has_los_current) if has_los_current is not None else False,
+    )
+    offset += TACTICAL_FEATURES
+
     # Encode move features
     if max_legal_moves > 0 and legal_moves:
-        board_hexes = board.get("hexes", [])
         _flatten_move_features(
             result, offset, legal_moves, max_legal_moves, board_width, board_height,
             rl_unit=rl_unit, enemy_unit=enemy_unit, board_hexes=board_hexes,
@@ -137,11 +161,16 @@ def flatten_observation_hierarchical(
     result = np.zeros(obs_size, dtype=np.float32)
 
     board = obs.get("board", {})
+    board_hexes = board.get("hexes", [])
+
+    # Build elevation map once for efficient lookup
+    elev_map: dict[tuple[int, int], float] = {}
+    for h in board_hexes:
+        elev_map[(h["x"], h["y"])] = h.get("elevation", 0)
 
     # Board block (same as flat, disabled when INCLUDE_BOARD_ELEVATION is False)
     if INCLUDE_BOARD_ELEVATION:
-        hexes = board.get("hexes", [])
-        for h in hexes:
+        for h in board_hexes:
             x, y = h["x"], h["y"]
             if 0 <= x < board_width and 0 <= y < board_height:
                 idx = y * board_width + x
@@ -160,19 +189,37 @@ def flatten_observation_hierarchical(
     # Encode units (same as flat)
     offset = _board_block_size(board_width, board_height)
     if rl_unit is not None:
-        _encode_unit(result, offset, rl_unit, board_width, board_height)
+        _encode_unit(result, offset, rl_unit, board_width, board_height,
+                     board_hexes=board_hexes, elev_map=elev_map)
     offset += UNIT_FEATURES
     if enemy_unit is not None:
-        _encode_unit(result, offset, enemy_unit, board_width, board_height)
+        _encode_unit(result, offset, enemy_unit, board_width, board_height,
+                     board_hexes=board_hexes, elev_map=elev_map)
     offset += UNIT_FEATURES
 
     # Global features (same as flat)
     result[offset] = float(obs.get("rl_moves_first", False))
     offset += GLOBAL_FEATURES
 
+    # Tactical features (same as flat)
+    has_los_current = obs.get("has_los_current")
+    if has_los_current is None and legal_moves and rl_unit and rl_unit.get("x", -1) >= 0:
+        rl_x, rl_y = rl_unit["x"], rl_unit["y"]
+        for m in legal_moves:
+            if m.get("dest_x") == rl_x and m.get("dest_y") == rl_y:
+                has_los_current = m.get("has_los", False)
+                break
+    _encode_tactical_features(
+        result, offset,
+        rl_unit=rl_unit, enemy_unit=enemy_unit,
+        elev_map=elev_map, board_width=board_width, board_height=board_height,
+        game_round=obs.get("round", 0),
+        has_los_current=bool(has_los_current) if has_los_current is not None else False,
+    )
+    offset += TACTICAL_FEATURES
+
     # Destination + facing feature blocks
     if legal_moves:
-        board_hexes = board.get("hexes", [])
         walk_mp = rl_unit.get("mp_walk", 0) if rl_unit else 0
         _flatten_dest_features(
             result, offset, legal_moves, max_destinations, board_width, board_height,
@@ -362,12 +409,71 @@ def _flatten_move_features(
             buf[base + 9] = float(m.get("has_los", False))
 
 
+def _encode_tactical_features(
+    buf: np.ndarray,
+    offset: int,
+    rl_unit: dict | None,
+    enemy_unit: dict | None,
+    elev_map: dict[tuple[int, int], float],
+    board_width: int,
+    board_height: int,
+    game_round: int,
+    has_los_current: bool,
+) -> None:
+    """Write 6 relational/tactical features into buf[offset:offset+TACTICAL_FEATURES].
+
+    Features: hex_distance, rl_range_quality, enemy_range_quality, has_los,
+    relative_elevation, round_number.
+    """
+    i = offset
+    max_dim = board_width + board_height
+
+    has_rl = (rl_unit is not None and rl_unit.get("x", -1) >= 0
+              and rl_unit.get("y", -1) >= 0)
+    has_enemy = (enemy_unit is not None and enemy_unit.get("x", -1) >= 0
+                 and enemy_unit.get("y", -1) >= 0)
+
+    if has_rl and has_enemy:
+        rl_x, rl_y = rl_unit["x"], rl_unit["y"]
+        ex, ey = enemy_unit["x"], enemy_unit["y"]
+        rl_facing = rl_unit.get("facing", 0)
+        enemy_facing = enemy_unit.get("facing", 0)
+
+        dist = hex_distance(rl_x, rl_y, ex, ey)
+        buf[i] = dist / max_dim
+
+        buf[i + 1] = _norm_rq(range_quality(
+            rl_unit, dist,
+            target_x=ex, target_y=ey,
+            unit_x=rl_x, unit_y=rl_y,
+            unit_facing=rl_facing,
+        ))
+
+        buf[i + 2] = _norm_rq(range_quality(
+            enemy_unit, dist,
+            target_x=rl_x, target_y=rl_y,
+            unit_x=ex, unit_y=ey,
+            unit_facing=enemy_facing,
+        ))
+
+        buf[i + 3] = float(has_los_current)
+
+        rl_elev = elev_map.get((rl_x, rl_y), 0)
+        enemy_elev = elev_map.get((ex, ey), 0)
+        buf[i + 4] = (rl_elev - enemy_elev) / 10.0
+
+    # Round number (always available, even without enemy)
+    buf[i + 5] = game_round / 50.0
+
+
 def _encode_unit(
     buf: np.ndarray,
     offset: int,
     unit: dict,
     board_width: int,
     board_height: int,
+    board_hexes: list | None = None,
+    elev_map: dict[tuple[int, int], float] | None = None,
 ) -> None:
     i = offset
 
@@ -425,6 +531,25 @@ def _encode_unit(
         if w_idx < len(weapons):
             buf[i] = float(weapons[w_idx].get("destroyed", False))
         i += 1
+
+    # Terrain cover at current hex (1 feature)
+    x_raw = unit.get("x", -1)
+    y_raw = unit.get("y", -1)
+    if board_hexes and x_raw >= 0 and y_raw >= 0:
+        buf[i] = cover_value(board_hexes, x_raw, y_raw) / 2.0
+    i += 1
+
+    # Elevation at current hex (1 feature)
+    if elev_map and x_raw >= 0 and y_raw >= 0:
+        buf[i] = elev_map.get((x_raw, y_raw), 0) / 10.0
+    i += 1
+
+    # System crit hits (3 features)
+    crit = unit.get("crit_state", {})
+    buf[i] = crit.get("engine_hits", 0) / 3.0
+    buf[i + 1] = crit.get("gyro_hits", 0) / 2.0
+    buf[i + 2] = crit.get("sensor_hits", 0) / 2.0
+    i += 3
 
 
 def identify_rl_owner(obs: dict, active_entity_id: int) -> int:
