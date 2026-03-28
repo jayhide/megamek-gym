@@ -54,8 +54,8 @@ Python (Gymnasium Env)  ←— JSON/TCP on port 9999 —→  Java (RLBotClient i
         └── Sends action index                                  └── Translates index → MovePath
 ```
 
-- **Observation space**: `Box(shape=(W*H + 111 + max_legal_moves * 10,), float32)` — board elevations (W*H) + RL unit state (55) + enemy unit state (55) + global features (1) + move features (max_legal_moves × 10). Default board (16x17) with 400 max moves gives 4383. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). The 10 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `dist_to_enemy/(W+H)`, `range_quality` (RL weapon effectiveness from dest, arc-aware, normalized from [-0.5,1.0] to [0.0,1.0]), `enemy_range_quality` (enemy weapon effectiveness at this distance, arc-aware, normalized to [0.0,1.0]), `terrain_cover/2` (Light Woods=0.5, Heavy Woods=1.0), `elevation_diff/10` (dest elevation minus enemy elevation), `has_los` (1.0 if a standing Mech at dest has line-of-sight to enemy hex, 0.0 if blocked by terrain/elevation; precomputed once per JVM lifetime via `LosLookupTable`). Tactical features default to 0.0 when the enemy is missing/undeployed. Unused slots (index >= n_legal_moves) are zero-padded.
-- **Critic input**: The value network (critic) receives only the 111 state features (2×55 unit features + 1 global), not the per-move/per-destination action-space features. This prevents the critic from having to learn to ignore ~1875 dims of action-space description. **Future experiment**: add current-hex terrain features (cover + elevation at RL unit's hex and enemy's hex) to the critic input — this information is currently only available indirectly through the action-space features, which the critic doesn't see.
+- **Observation space**: `Box(shape=(W*H + 127 + max_legal_moves * 10,), float32)` — board elevations (W*H) + RL unit state (60) + enemy unit state (60) + global features (1) + tactical features (6) + move features (max_legal_moves × 10). Default board (16x17) with 400 max moves gives 4399. The global feature is `rl_moves_first` (1.0 if RL moves before opponent, 0.0 if after). Per-unit features (60 each): position(2) + facing one-hot(6) + walk/run/jump MP(3) + heat(1) + status flags(4: prone, destroyed, deployed, retreated) + armor per location(32: 8 locations × 4 values) + weapon destroyed flags(7) + terrain_cover at current hex(/2.0, 1 feature) + elevation at current hex(/10.0, 1 feature) + engine_hits(/3.0, 1 feature) + gyro_hits(/2.0, 1 feature) + sensor_hits(/2.0, 1 feature). Tactical features (6): hex_distance_to_enemy/(W+H), rl_range_quality from current position (arc-aware, _norm_rq), enemy_range_quality from current position, has_los from current position, relative_elevation (rl - enemy)/10, round_number/50. The 10 per-move features are: `dest_x/W`, `dest_y/H`, `facing/5`, `mp_used/20`, `dist_to_enemy/(W+H)`, `range_quality` (RL weapon effectiveness from dest, arc-aware, normalized from [-0.5,1.0] to [0.0,1.0]), `enemy_range_quality` (enemy weapon effectiveness at this distance, arc-aware, normalized to [0.0,1.0]), `terrain_cover/2` (Light Woods=0.5, Heavy Woods=1.0), `elevation_diff/10` (dest elevation minus enemy elevation), `has_los` (1.0 if a standing Mech at dest has line-of-sight to enemy hex, 0.0 if blocked by terrain/elevation; precomputed once per JVM lifetime via `LosLookupTable`). Tactical features default to 0.0 when the enemy is missing/undeployed. Unused slots (index >= n_legal_moves) are zero-padded.
+- **Critic input**: The value network (critic) receives the 127 state features (2×60 unit features + 1 global + 6 tactical), not the per-move/per-destination action-space features. This prevents the critic from having to learn to ignore ~1875 dims of action-space description. The tactical features give the critic crucial context about the current tactical situation (distance, weapon effectiveness, LOS, terrain, game progress) that was previously only available in the per-move features.
 - **Action space**: `Discrete(max_legal_moves)` with action masking for legal moves
 - **Reward**: computed Python-side via composable `RewardFunction` classes (default: DamageDelta + LocationDestruction + 0.5x RangeAdvantage + 0.05x Cover + 0.5x PronePenalty + 1x WinLoss). DamageDelta weights internal structure damage at 2x armor and normalizes by 20 (so a 20-damage hit = reward 1.0). LocationDestruction gives a bonus/penalty when a location is fully destroyed, weighted by tactical significance (CT/HD=1.0, torsos=0.4, legs=0.3, arms=0.2). RangeAdvantage blends absolute RL range quality with the differential advantage: `absolute_weight * rl_quality + (1 - absolute_weight) * (rl_quality - enemy_quality)` (default absolute_weight=0.3). This ensures the agent is rewarded for closing to firing range even in mirror matchups where the differential cancels out. RangeAdvantage uses the `prev_round_enemy_x/y/facing` fields from the observation (captured by Java at the start of the firing phase, after both units have moved) to evaluate positions against the correct post-movement enemy position regardless of initiative order. Without this, the reward would be wrong ~50% of the time when initiative changes between rounds (the live enemy position in `units[]` may reflect an extra move from the current round). Range quality scores how well a unit's weapons perform at the current hex distance (short=1.0, medium=0.5, long=0.0, out-of-range/below-min=-0.5) using damage-weighted averages. Weapons outside their firing arc (based on unit facing and weapon location) have their range score multiplied by 0.5 — they still contribute for being at favorable distance but at reduced value since they can't fire this turn. Firing arcs are twist-aware: upper-body weapons (HD, CT, RT, LT, RA, LA) check all achievable torso twist positions (±1 hex-side for standard mechs) and count as "in arc" if any twist brings them to bear. Leg weapons (RL, LL) use primary (leg) facing only since they don't rotate with the torso. Arc geometry matches MegaMek's `FacingArc` system: forward arc (±60° from facing, 120° cone) for torso/head/leg weapons, arm arcs extend 60° further on their side (180° cone each). The raw (no-twist) `in_firing_arc` function is cross-validated against Java's `ComputeArc.isInArc` via smoke test; the twist-aware wrapper `in_firing_arc_with_twist` is used by `range_quality`. Cover rewards the RL unit for positioning in terrain with to-hit modifiers (Light Woods=1.0, Heavy Woods=2.0); only RL cover is scored since the agent can't control enemy positioning. PronePenalty applies -1.0 when the RL unit transitions from not-prone to prone (all such transitions are involuntary falls since the Java move enumeration never offers "go prone").
 
@@ -120,6 +120,7 @@ perf_test.py             # Multi-env startup timing and diagnostics
 mem_benchmark.py         # Measure memory usage across N parallel environments
 mem_growth.py            # Track JVM memory growth over many games (single JVM)
 train_ppo.py             # CleanRL-style PPO training script
+train_queue.py           # Sequential training queue runner (overnight sweeps)
 tb_summary.py            # TensorBoard run analyzer (text summaries, diagnostics, comparison)
 eval.py                  # Evaluation script for trained checkpoints
 clean_saves.py           # Delete training artifacts (saves, run dirs, logs, heap dumps)
@@ -129,6 +130,7 @@ visualize_hex_map.py     # Interactive hex map viewer: board terrain, reachable 
 game_viewer.py           # Combined hex map + transcript viewer (side-by-side HTML)
 bench_sim.py             # Profile sim latency (per-phase breakdown) and memory usage
 validate_sim.py          # Cross-validate Python sim against Java MegaMek (tiered tests)
+diagnose_features.py     # Test if critic features can predict returns (sklearn R² diagnostic)
 
 tests/
 ├── conftest.py               # Shared fixtures: megamek_dir, base_port, java_trace
@@ -251,6 +253,37 @@ poetry run python train_ppo.py --megamek-dir ../megamek --config configs/default
 **Timing instrumentation:** Each update prints `rollout=Xs train=Ys episodes=N` to identify bottlenecks. Also logged to TensorBoard under `timing/rollout_seconds`, `timing/train_seconds`, `timing/episodes_per_rollout`.
 
 **Dependencies:** `torch`, `tensorboard` (added to pyproject.toml alongside gymnasium/numpy/pyyaml)
+
+## Training Queue
+
+Queue multiple training runs to execute sequentially (e.g., overnight hyperparameter sweeps). Each run is a subprocess with full process isolation — crashes in one run don't affect the queue.
+
+```bash
+# Run a queue
+poetry run python train_queue.py sweep.yaml
+
+# Preview commands without running
+poetry run python train_queue.py sweep.yaml --dry-run
+
+# Resume an interrupted queue
+poetry run python train_queue.py --resume runs/queue__*/queue_state.yaml
+```
+
+**Queue YAML format** — each run references a complete config file (the config is the source of truth):
+```yaml
+runs:
+  - name: "lr-high"              # optional display label
+    config: configs/lr_high.yaml
+  - name: "lr-low"
+    config: configs/lr_low.yaml
+  - config: configs/ent_sweep.yaml   # name defaults to config stem
+```
+
+**Error recovery:** If a run fails (nonzero exit), the queue logs the failure and continues to the next run. A summary table at the end shows which succeeded/failed.
+
+**Interrupt handling:** First Ctrl+C lets the current run finish gracefully, then stops the queue. Second Ctrl+C force-quits.
+
+**State persistence:** Progress is saved to `runs/queue__{timestamp}/queue_state.yaml` after each run. Use `--resume` to pick up where an interrupted queue left off.
 
 ## Persistent JVM (Reset Without Restart)
 
@@ -378,6 +411,23 @@ poetry run python bench_sim.py --scaling --env-counts 1,2,4,8
 ```
 
 Monkey-patches sim internals with timing wrappers (zero sim code changes) to break down per-step latency into phases: move enumeration (RL + opponent), Princess AI, firing, heat, observation flattening, and reward computation. Also reports RSS memory at checkpoints, key object sizes, and tracemalloc top allocations.
+
+## Feature Predictiveness Diagnostic
+
+Use `diagnose_features.py` to test whether the critic's 111 state features contain enough signal to predict GAE returns. Collects rollout data, fits sklearn models (LinearRegression + RandomForest), and reports R² scores with feature importance rankings.
+
+```bash
+# Random policy baseline (sim backend, fast)
+poetry run python diagnose_features.py --config configs/sanity_check_sim.yaml --num-steps 4096 --num-envs 30
+
+# With a trained checkpoint
+poetry run python diagnose_features.py --config configs/sanity_check_sim.yaml --checkpoint runs/.../latest.pt --num-steps 4096 --num-envs 30
+
+# Re-analyze saved data (no envs needed)
+poetry run python diagnose_features.py --load feature_data.npz
+```
+
+Saves collected data to `feature_data.npz` for reuse. Interpretation guide: RF CV R² < 30% means features are the bottleneck; 30-60% means both features and capacity matter; 60%+ means the neural net needs more capacity or training. Use `--num-envs 30` with the sim backend for fast collection (~120k samples in under a minute).
 
 ## Memory Growth Tracking
 
