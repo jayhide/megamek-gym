@@ -36,11 +36,20 @@ def validate_initial_facing(
     """Compare initial unit facings between sim Game and Java observation.
 
     Creates a sim Game with the same starting positions, resets it, and
-    compares the resulting facings against the Java round-1 observation.
+    compares the resulting facings against Java's deployment_state (captured
+    before any movement, regardless of initiative order).
     """
     from megamek_gym.sim.game import Game
 
     result = InitialFacingResult()
+
+    deployment = raw_obs.get("deployment_state")
+    if deployment is None:
+        result.mismatches.append(
+            "deployment_state missing from observation "
+            "(Java bridge may need updating)"
+        )
+        return result
 
     # Run sim game to get its initial facings
     game = Game(
@@ -51,9 +60,8 @@ def validate_initial_facing(
     )
     game.reset()
 
-    # Extract Java unit facings from the observation
-    units = raw_obs.get("units", [])
-    for u in units:
+    # Compare against deployment-time facings (pre-movement)
+    for u in deployment:
         owner = u.get("owner")
         java_facing = u.get("facing")
         if java_facing is None:

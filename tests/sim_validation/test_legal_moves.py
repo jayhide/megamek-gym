@@ -38,6 +38,9 @@ class LegalMoveResult:
     # Level 4: mp_used disagreements at shared (x, y, facing)
     mp_mismatches: list[str] = field(default_factory=list)
 
+    # Step skipped because entity already partially moved this round
+    skipped_partial_move: bool = False
+
     # Diagnostic data (populated for prone steps with extras)
     _sim_moves: list[dict] = field(default_factory=list, repr=False)
     _walk_mp: int = 0
@@ -70,6 +73,7 @@ class LegalMoveSummary:
     total_shared_moves: int = 0
     total_java_only_moves: int = 0
     total_sim_only_moves: int = 0
+    skipped_partial_moves: int = 0
 
     @property
     def hex_match_rate(self) -> float:
@@ -146,6 +150,14 @@ def validate_legal_moves(java_obs: dict, rl_owner_id: int,
 
     result.unit_pos = (java_unit["x"], java_unit["y"], java_unit["facing"])
     result.unit_prone = java_unit.get("prone", False)
+
+    # Skip steps where the entity has already partially moved this round
+    # (e.g., fell after standing up, got a second turn with mpUsed > 0).
+    # The Python sim models one movement per round, so this state is unreachable.
+    entity_mp_used = java_unit.get("mp_used", 0)
+    if entity_mp_used > 0:
+        result.skipped_partial_move = True
+        return result
 
     # Reconstruct sim unit
     sim_unit = reconstruct_unit(java_unit, "Trebuchet TBT-5S")
@@ -237,6 +249,10 @@ def validate_legal_moves_trace(trace_steps: list, rl_owner_id: int,
 
         result = validate_legal_moves(raw_obs, rl_owner_id, step.step_idx,
                                      algorithm=algorithm)
+        if result.skipped_partial_move:
+            summary.skipped_partial_moves += 1
+            continue
+
         summary.per_step.append(result)
 
         summary.total_java_moves += result.java_move_count

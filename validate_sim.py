@@ -165,7 +165,11 @@ def test_legal_moves(trace, verbose: bool) -> bool:
     summary = validate_legal_moves_trace(trace.steps, trace.rl_owner_id,
                                          algorithm="deque")
 
-    _print_info(f"Checked {len(summary.per_step)} steps")
+    checked = len(summary.per_step)
+    if summary.skipped_partial_moves:
+        _print_info(f"Checked {checked} steps (skipped {summary.skipped_partial_moves} partial-move steps)")
+    else:
+        _print_info(f"Checked {checked} steps")
     _print_info(f"Java total moves: {summary.total_java_moves}")
     _print_info(f"Sim total moves:  {summary.total_sim_moves}")
     _print_info(f"Hex match rate:   {summary.hex_match_rate:.1%}")

@@ -347,42 +347,49 @@ def run_benchmark(
 # Scaling benchmark
 # ---------------------------------------------------------------------------
 
+def _make_sim_env(env_index: int, seed: int):
+    """Factory for AsyncVectorEnv subprocess workers."""
+    def thunk():
+        from megamek_gym.sim.env import MegaMekSimEnv
+        env = MegaMekSimEnv()
+        return env
+    return thunk
+
+
 def run_scaling(env_counts: list[int], num_games: int, seed: int) -> list[dict]:
-    """Run benchmark with varying numbers of in-process envs."""
-    from megamek_gym.sim.env import MegaMekSimEnv
+    """Run benchmark with varying numbers of envs using AsyncVectorEnv."""
+    import gymnasium
 
     scaling_results = []
     for n_envs in env_counts:
-        envs = [MegaMekSimEnv() for _ in range(n_envs)]
+        vec_env = gymnasium.vector.AsyncVectorEnv(
+            [_make_sim_env(i, seed) for i in range(n_envs)],
+            autoreset_mode="SameStep",
+        )
 
-        # Reset all
-        for i, env in enumerate(envs):
-            env.reset(seed=seed + i)
+        obs, infos = vec_env.reset(seed=seed)
+        action_masks = infos["action_mask"]
 
         total_steps = 0
-        games_done = [0] * n_envs
+        total_games = 0
         t0 = time.perf_counter_ns()
 
-        while min(games_done) < num_games:
-            for i, env in enumerate(envs):
-                if games_done[i] >= num_games:
-                    continue
-                masks = env.action_masks()
-                dest_mask = masks["dest_mask"]
+        while total_games < n_envs * num_games:
+            # Pick random valid actions for each env
+            actions = np.zeros((n_envs, 2), dtype=np.int64)
+            for i in range(n_envs):
+                dest_mask = action_masks["dest_mask"][i]
                 valid_dests = np.where(dest_mask)[0]
                 dest_idx = np.random.choice(valid_dests) if len(valid_dests) else 0
-                facing_mask = masks["facing_mask"][dest_idx]
+                facing_mask = action_masks["facing_mask"][i][dest_idx]
                 valid_facings = np.where(facing_mask)[0]
                 facing_idx = np.random.choice(valid_facings) if len(valid_facings) else 0
+                actions[i] = [dest_idx, facing_idx]
 
-                obs, reward, terminated, truncated, info = env.step(
-                    np.array([dest_idx, facing_idx])
-                )
-                total_steps += 1
-                if terminated or truncated:
-                    games_done[i] += 1
-                    if games_done[i] < num_games:
-                        env.reset(seed=seed + i + games_done[i] * 100)
+            obs, rewards, terminated, truncated, infos = vec_env.step(actions)
+            action_masks = infos["action_mask"]
+            total_steps += n_envs
+            total_games += np.sum(terminated | truncated)
 
         elapsed_s = (time.perf_counter_ns() - t0) / 1e9
         rss = read_rss_mb()
@@ -391,17 +398,17 @@ def run_scaling(env_counts: list[int], num_games: int, seed: int) -> list[dict]:
         scaling_results.append({
             "n_envs": n_envs,
             "total_steps": total_steps,
+            "total_games": int(total_games),
             "elapsed_s": elapsed_s,
             "sps": sps,
             "sps_per_env": sps / n_envs,
             "rss_mb": rss,
         })
 
-        # Clean up
-        for env in envs:
-            env.close()
+        vec_env.close()
 
-        print(f"  {n_envs} envs: {sps:.1f} SPS ({sps/n_envs:.1f}/env), RSS={rss:.1f} MB")
+        print(f"  {n_envs} envs: {sps:.1f} SPS ({sps/n_envs:.1f}/env), "
+              f"{int(total_games)} games, RSS={rss:.1f} MB")
 
     return scaling_results
 
@@ -487,12 +494,13 @@ def print_report(results: dict, scaling: list[dict] | None = None):
 
     # Scaling
     if scaling:
-        print(f"\n--- Scaling (in-process) ---")
-        header = f"{'Envs':>4s}  {'SPS':>8s}  {'SPS/env':>8s}  {'RSS (MB)':>8s}"
+        print(f"\n--- Scaling (AsyncVectorEnv) ---")
+        header = f"{'Envs':>4s}  {'SPS':>8s}  {'SPS/env':>8s}  {'Games':>6s}  {'Wall (s)':>8s}  {'RSS (MB)':>8s}"
         print(header)
         print("-" * len(header))
         for s in scaling:
             print(f"{s['n_envs']:>4d}  {s['sps']:>8.1f}  {s['sps_per_env']:>8.1f}"
+                  f"  {s['total_games']:>6d}  {s['elapsed_s']:>8.1f}"
                   f"  {s['rss_mb']:>8.1f}")
 
 
