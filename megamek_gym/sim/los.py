@@ -440,14 +440,12 @@ def _los_divided(board: Board, triplets: list[tuple[int, int]],
     left_total = (left_light + left_heavy * 2) if not left_blocked else None
     right_total = (right_light + right_heavy * 2) if not right_blocked else None
 
-    if left_total is None and right_total is None:
+    # Defender's choice: pick the worse (higher) side. A blocked path
+    # (IMPOSSIBLE in Java) is always worse than any numeric score,
+    # so if either path is blocked the defender picks it → no LOS.
+    if left_total is None or right_total is None:
         return False
-    elif left_total is None:
-        return right_total < 3
-    elif right_total is None:
-        return left_total < 3
-    else:
-        return max(left_total, right_total) < 3
+    return max(left_total, right_total) < 3
 
 
 def compute_los(board: Board, x1: int, y1: int, x2: int, y2: int) -> bool:

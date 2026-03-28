@@ -63,24 +63,32 @@ class TestInitialFacing:
 
 
 @pytest.mark.validation
-class TestLos:
-    def test_los(self, java_trace):
+class TestLosWalkPatrol:
+    """Both mechs walk scripted waypoints; validate LOS at every step."""
+
+    def test_los_walk_patrol(self, walk_patrol_trace):
         from megamek_gym.sim.board import BOARD
         from megamek_gym.sim.los import LosTable
         from tests.sim_validation.test_los import validate_los
 
+        trace = walk_patrol_trace
         los_table = LosTable(BOARD)
         total_checks = 0
         all_mismatches = []
 
-        for step in java_trace.steps:
-            raw_obs = step.raw_obs
-            if raw_obs.get("terminated") or raw_obs.get("truncated"):
+        for step in trace.steps:
+            obs = step.raw_obs
+            if obs.get("terminated") or obs.get("truncated"):
                 continue
-            if not raw_obs.get("legal_moves"):
+            if not obs.get("legal_moves"):
                 continue
 
-            result = validate_los(raw_obs, los_table, java_trace.rl_owner_id)
+            active_id = obs.get("active_entity_id", -1)
+            owner = trace.entity_owners.get(active_id, -1)
+            if owner < 0:
+                continue
+
+            result = validate_los(obs, los_table, owner)
             total_checks += result.total_checks
             all_mismatches.extend(result.mismatches)
 
@@ -183,38 +191,53 @@ class TestLegalMovesRunPatrol:
 
 @pytest.mark.validation
 class TestProneMoves:
-    def test_prone_moves(self, java_trace):
+    """Validate legal moves when the RL unit is prone.
+
+    Uses prone_patrol_trace: a dual-bot trace where the RL unit (owner 0) starts
+    prone via inject_state. This guarantees prone steps every run without relying
+    on stochastic falls.
+    """
+
+    def test_prone_moves(self, prone_patrol_trace):
         from tests.sim_validation.test_legal_moves import (
             validate_legal_moves, diagnose_prone_extras,
         )
         from tests.sim_validation.reconstruct import extract_unit_state
 
+        trace = prone_patrol_trace
+        rl_owner = trace.rl_owner_id
         prone_steps = []
-        for step in java_trace.steps:
+        for step in trace.steps:
             raw_obs = step.raw_obs
             if raw_obs.get("terminated") or raw_obs.get("truncated"):
                 continue
             if not raw_obs.get("legal_moves"):
                 continue
-            java_unit = extract_unit_state(raw_obs, java_trace.rl_owner_id)
+            active_id = raw_obs.get("active_entity_id", -1)
+            owner = trace.entity_owners.get(active_id, -1)
+            if owner != rl_owner:
+                continue  # Only check the prone RL unit
+            java_unit = extract_unit_state(raw_obs, owner)
             if java_unit and java_unit.get("prone", False):
-                prone_steps.append(step)
+                prone_steps.append((step, owner))
 
-        if not prone_steps:
-            pytest.skip(
-                "No prone steps in trace. "
-                "Try: --random-actions --max-rounds 20"
-            )
+        assert prone_steps, (
+            "No prone steps found in prone_patrol_trace. "
+            "inject_state may not have applied correctly."
+        )
 
         diagnostics = []
         total_sim_only = 0
         steps_with_extras = 0
+        java_only_total = 0
 
-        for step in prone_steps:
+        for step, owner in prone_steps:
             result = validate_legal_moves(
-                step.raw_obs, java_trace.rl_owner_id,
+                step.raw_obs, owner,
                 step_idx=step.step_idx, algorithm="deque",
             )
+            if result.skipped_partial_move:
+                continue
             if result.sim_only_hexes:
                 steps_with_extras += 1
                 total_sim_only += len(result.sim_only_hexes)
@@ -223,6 +246,7 @@ class TestProneMoves:
                 )
                 if diag:
                     diagnostics.append(diag)
+            java_only_total += len(result.java_only_hexes)
 
         summary = (
             f"Prone steps: {len(prone_steps)}, "
@@ -233,36 +257,36 @@ class TestProneMoves:
         for d in diagnostics:
             print(d)
 
-        # This test is diagnostic — it prints details but only fails on java-only hexes
-        java_only = 0
-        for step in prone_steps:
-            result = validate_legal_moves(
-                step.raw_obs, java_trace.rl_owner_id,
-                step_idx=step.step_idx, algorithm="deque",
-            )
-            java_only += len(result.java_only_hexes)
-
-        assert java_only == 0, (
-            f"{java_only} java-only hexes in prone steps (Python sim is MISSING moves)"
+        assert java_only_total == 0, (
+            f"{java_only_total} java-only hexes in prone steps "
+            f"(Python sim is MISSING moves)"
         )
 
 
 @pytest.mark.validation
-class TestDistances:
-    def test_distances(self, java_trace):
+class TestDistancesWalkPatrol:
+    """Both mechs walk scripted waypoints; validate distances at every step."""
+
+    def test_distances_walk_patrol(self, walk_patrol_trace):
         from tests.sim_validation.test_to_hit import validate_distances
 
+        trace = walk_patrol_trace
         total_checks = 0
         all_mismatches = []
 
-        for step in java_trace.steps:
-            raw_obs = step.raw_obs
-            if raw_obs.get("terminated") or raw_obs.get("truncated"):
+        for step in trace.steps:
+            obs = step.raw_obs
+            if obs.get("terminated") or obs.get("truncated"):
                 continue
-            if not raw_obs.get("legal_moves"):
+            if not obs.get("legal_moves"):
                 continue
 
-            result = validate_distances(raw_obs, java_trace.rl_owner_id)
+            active_id = obs.get("active_entity_id", -1)
+            owner = trace.entity_owners.get(active_id, -1)
+            if owner < 0:
+                continue
+
+            result = validate_distances(obs, owner)
             total_checks += result.distance_checks
             all_mismatches.extend(result.distance_mismatches)
 
@@ -383,6 +407,111 @@ class TestFiring:
         )
         if result.opp_fireable_total == 0 and result.rl_fireable_total == 0:
             pytest.skip("No firing rounds with firing_report (Java may lack telemetry)")
+
+
+@pytest.mark.validation
+class TestFiringWalkPatrol:
+    """Both mechs walk scripted waypoints; validate firing reports at every round."""
+
+    def test_firing_walk_patrol(self, walk_patrol_trace):
+        from megamek_gym.sim.board import BOARD
+        from megamek_gym.sim.los import LosTable
+        from tests.sim_validation.test_firing import validate_firing_single_round
+
+        trace = walk_patrol_trace
+        rl_owner_id = trace.rl_owner_id
+        assert rl_owner_id >= 0, "Could not determine RL owner ID"
+
+        board = BOARD
+        los_table = LosTable(board)
+
+        rounds_with_firing = 0
+        fireable_matches = 0
+        fireable_total = 0
+        tn_matches = 0
+        tn_total = 0
+        mismatches = []
+
+        for step in trace.steps:
+            obs = step.raw_obs
+            if obs.get("terminated") or obs.get("truncated"):
+                continue
+            if not obs.get("firing_report"):
+                continue
+
+            rounds_with_firing += 1
+            comparisons = validate_firing_single_round(
+                obs, rl_owner_id, board=board, los_table=los_table,
+            )
+
+            for comp in comparisons:
+                if comp.skipped:
+                    continue
+                fireable_matches += comp.fireable_match_count
+                fireable_total += comp.fireable_total
+                tn_matches += comp.tn_match_count
+                tn_total += comp.tn_total
+
+                for w in comp.weapons:
+                    if not w.fireable_match:
+                        java_f = w.java_can_fire and not w.java_impossible
+                        mismatches.append(
+                            f"Round {comp.round_num} {comp.entity_label} "
+                            f"{w.weapon_name} loc={w.location}: "
+                            f"java_fireable={java_f} (can_fire={w.java_can_fire} "
+                            f"impossible={w.java_impossible} desc=\"{w.java_desc}\") "
+                            f"python_fireable={w.python_can_fire}"
+                        )
+                    elif w.tn_match is False:
+                        mismatches.append(
+                            f"Round {comp.round_num} {comp.entity_label} "
+                            f"{w.weapon_name}: java_tn={w.java_tn} "
+                            f"python_tn={w.python_tn} (delta={w.tn_delta:+d}) "
+                            f"desc=\"{w.java_desc}\""
+                        )
+
+        # Categorize mismatches by known gap type
+        arc_mismatches = [m for m in mismatches if "not in arc" in m]
+        cover_mismatches = [m for m in mismatches if "partial cover" in m]
+        other_mismatches = [m for m in mismatches
+                           if "not in arc" not in m and "partial cover" not in m]
+
+        print(f"\nFiring walk patrol: {rounds_with_firing} rounds with firing_report, "
+              f"fireability {fireable_matches}/{fireable_total}, "
+              f"TNs {tn_matches}/{tn_total}")
+        if arc_mismatches:
+            print(f"  Arc mismatches (known gap): {len(arc_mismatches)}")
+        if cover_mismatches:
+            print(f"  Partial cover TN mismatches (known gap): {len(cover_mismatches)}")
+        if other_mismatches:
+            print(f"\nUNEXPECTED MISMATCHES ({len(other_mismatches)}):")
+            for m in other_mismatches:
+                print(f"  {m}")
+
+        assert rounds_with_firing > 0, (
+            "No rounds with firing_report in walk patrol trace"
+        )
+        assert fireable_total > 0, (
+            "No weapons compared across all firing rounds"
+        )
+        # Arc and partial cover mismatches are known Python sim gaps.
+        # Assert no OTHER unexpected mismatches.
+        assert not other_mismatches, (
+            f"Unexpected mismatches: {len(other_mismatches)}.\n"
+            + "\n".join(other_mismatches[:10])
+        )
+        # Fireability rate should be at least 80% even with arc gaps
+        fireable_rate = fireable_matches / fireable_total
+        assert fireable_rate >= 0.80, (
+            f"Fireability rate {fireable_rate:.1%} below 80% threshold"
+        )
+        # TN match rate: partial cover gap causes ~20% mismatches in some runs
+        if tn_total > 0:
+            tn_rate = tn_matches / tn_total
+            assert tn_rate >= 0.75, (
+                f"TN match rate {tn_rate:.1%} below 75% threshold.\n"
+                + "\n".join(other_mismatches[:10])
+            )
 
 
 @pytest.mark.validation
