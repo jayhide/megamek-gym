@@ -37,7 +37,7 @@ poetry run pytest -m validation --megamek-dir ../megamek --random-actions  # bet
 **Markers:**
 - *(no marker)* — unit tests: config, observation, reward, early termination, heat MP. No JVM needed.
 - `integration` — smoke tests: basic episode, truncation, termination, persistent reset, cross-validation, auto-wake, fixed deployment, board consistency, pilot stats, hierarchical actions, feature distributions. Each launches its own JVM.
-- `validation` — sim cross-validation: board, unit template, LOS, legal moves, distances, to-hit, firing (weapon fireability + TNs), damage, heat, crits (monotonicity + side effects + MP consistency), statistical. Shares a single Java game trace (session-scoped fixture).
+- `validation` — sim cross-validation: board, unit template, LOS, legal moves (walk patrol + run patrol with dual-bot scripted movement), distances, to-hit, firing (weapon fireability + TNs), damage, heat, crits (monotonicity + side effects + MP consistency), statistical. Legal moves tests use dual-bot mode (`opponentType=rl`, `firingStrategy=none`) with scripted waypoint paths so both units traverse diverse board positions. Other tests share a single Java game trace (session-scoped fixture).
 
 The standalone scripts `smoke_test_all.py` and `validate_sim.py` are kept for manual debugging but the pytest wrappers (`tests/test_smoke.py`, `tests/test_sim_validation.py`) are the canonical way to run these tests.
 
@@ -72,6 +72,7 @@ The Java side lives at:
 | `RLGameRunner.java` | Headless game lifecycle manager; entry point launched by Gradle |
 | `RLBotClient.java` | Bot client that opens a `ServerSocket` bridge to the Python agent |
 | `ObservationBuilder.java` | Serializes full game state (board, units, legal moves) to JSON. Weapon damage for cluster weapons (SRM/LRM) is serialized as effective damage (rackSize × per-missile damage: SRM=2, LRM=1) rather than the raw `getDamage()` sentinel (-2). |
+| `NoFiringStrategy.java` | No-fire strategy: sends empty attack vector during firing phase (used for dual-bot validation tests) |
 | `ActionTranslator.java` | Parses `{"type": "action", "move_index": N}` and returns the corresponding `MovePath` |
 | `RewardCalculator.java` | Tracks armor/internal damage between steps; computes per-step and episode rewards |
 | `LosLookupTable.java` | Precomputed LOS for all hex pairs; built once per JVM, cached in `RLBotClient` |
@@ -83,7 +84,7 @@ The Java side lives at:
 ```
 ./gradlew :megamek:runRLGameRunner -PrlArgs="unit1|unit2|board|port|timeout|maxSaves|paranoidSave|rlStartPos|oppStartPos|rlDeployment|firingStrategy|maxGameRounds|perfLog|opponentType|forceGC|memLog|autoWakePilot|forceUnconsciousOnTurn|rlFixedX|rlFixedY|oppFixedX|oppFixedY|enableGameReports|validateCaches"
 ```
-Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
+Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optional and positional. Key options: `firingStrategy` accepts `"princess"` (default), `"naive"`, or `"none"` (no firing); `opponentType` accepts `"princess"` (default) or `"rl"` (second RLBotClient sharing the same socket, for dual-bot validation). See `megamek/src/megamek/client/bot/rl/CLAUDE.md` for the full arg reference table.
 
 **Documentation**: `docs/rl-python-side.md` in the megamek repo contains the original task spec for this Python environment.
 
@@ -142,6 +143,7 @@ tests/
 ├── test_sim_validation.py    # @validation: pytest wrappers for validate_sim.py (9 tests)
 └── sim_validation/           # Sim-vs-Java cross-validation suite
     ├── collector.py          # Run Java game, collect per-step observation traces
+    ├── dual_collector.py     # Dual-bot collector: both units RL-controlled with scripted waypoints
     ├── reconstruct.py        # Build sim.Unit from Java observation dict
     ├── test_board.py         # Board terrain/elevation comparison
     ├── test_unit_template.py # Unit armor, weapons, MP comparison

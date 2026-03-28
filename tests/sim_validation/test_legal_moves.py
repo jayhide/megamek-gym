@@ -132,7 +132,7 @@ def diagnose_prone_extras(result: LegalMoveResult, sim_moves: list[dict],
 
 def validate_legal_moves(java_obs: dict, rl_owner_id: int,
                          step_idx: int = 0,
-                         algorithm: str = "bfs") -> LegalMoveResult:
+                         algorithm: str = "deque") -> LegalMoveResult:
     """Compare Python-enumerated moves against Java legal_moves for one step."""
     result = LegalMoveResult(step_idx=step_idx)
 
@@ -236,7 +236,7 @@ def validate_legal_moves(java_obs: dict, rl_owner_id: int,
 
 
 def validate_legal_moves_trace(trace_steps: list, rl_owner_id: int,
-                               algorithm: str = "bfs") -> LegalMoveSummary:
+                               algorithm: str = "deque") -> LegalMoveSummary:
     """Validate legal moves across all non-terminal steps in a game trace."""
     summary = LegalMoveSummary()
 

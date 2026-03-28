@@ -44,3 +44,29 @@ def java_trace(request):
         action_fn=action_fn,
     )
     return trace
+
+
+@pytest.fixture(scope="session")
+def walk_patrol_trace(request):
+    """Dual-bot walk patrol trace for legal moves validation."""
+    from tests.sim_validation.dual_collector import collect_dual_game_trace
+
+    megamek_dir = request.config.getoption("--megamek-dir")
+    port = request.config.getoption("--port") + 1  # offset to avoid conflict
+    return collect_dual_game_trace(
+        megamek_dir=megamek_dir, port=port,
+        max_rounds=15, movement_mode="walk",
+    )
+
+
+@pytest.fixture(scope="session")
+def run_patrol_trace(request):
+    """Dual-bot run patrol trace for legal moves validation."""
+    from tests.sim_validation.dual_collector import collect_dual_game_trace
+
+    megamek_dir = request.config.getoption("--megamek-dir")
+    port = request.config.getoption("--port") + 2  # offset to avoid conflict
+    return collect_dual_game_trace(
+        megamek_dir=megamek_dir, port=port,
+        max_rounds=15, movement_mode="run",
+    )

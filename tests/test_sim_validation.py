@@ -92,35 +92,92 @@ class TestLos:
 
 
 @pytest.mark.validation
-class TestLegalMoves:
-    def test_legal_moves(self, java_trace):
-        from tests.sim_validation.test_legal_moves import validate_legal_moves_trace
+class TestLegalMovesWalkPatrol:
+    """Both mechs walk scripted waypoints; validate legal moves at every step."""
 
-        summary = validate_legal_moves_trace(
-            java_trace.steps, java_trace.rl_owner_id,
-        )
-        assert summary.passed, (
-            f"Legal moves mismatch: {summary.total_java_only_hexes} java-only + "
-            f"{summary.total_sim_only_hexes} sim-only hexes "
-            f"(hex_match={summary.hex_match_rate:.1%}, "
-            f"move_match={summary.move_match_rate:.1%})"
+    def test_walk_patrol(self, walk_patrol_trace):
+        from tests.sim_validation.test_legal_moves import validate_legal_moves
+
+        trace = walk_patrol_trace
+        failures = []
+        validated = 0
+
+        for step in trace.steps:
+            obs = step.raw_obs
+            if obs.get("terminated") or obs.get("truncated"):
+                continue
+            if not obs.get("legal_moves"):
+                continue
+
+            active_id = obs.get("active_entity_id", -1)
+            owner = trace.entity_owners.get(active_id, -1)
+            if owner < 0:
+                continue
+
+            result = validate_legal_moves(obs, owner, step.step_idx,
+                                            algorithm="deque")
+            if result.skipped_partial_move:
+                continue
+            validated += 1
+            if not result.passed:
+                failures.append(
+                    f"step {step.step_idx} entity {active_id} at "
+                    f"({result.unit_pos[0]},{result.unit_pos[1]},f={result.unit_pos[2]}): "
+                    f"{len(result.java_only_hexes)} java-only hexes, "
+                    f"{len(result.sim_only_hexes)} sim-only hexes, "
+                    f"{len(result.java_only_moves)} java-only moves, "
+                    f"{len(result.sim_only_moves)} sim-only moves"
+                )
+
+        assert validated > 0, "No movement steps validated"
+        assert not failures, (
+            f"{len(failures)}/{validated} steps failed.\n"
+            + "\n".join(failures[:10])
         )
 
 
 @pytest.mark.validation
-class TestLegalMovesDeque:
-    def test_legal_moves_deque(self, java_trace):
-        from tests.sim_validation.test_legal_moves import validate_legal_moves_trace
+class TestLegalMovesRunPatrol:
+    """Both mechs run scripted waypoints; validate legal moves at every step."""
 
-        summary = validate_legal_moves_trace(
-            java_trace.steps, java_trace.rl_owner_id, algorithm="deque",
-        )
+    def test_run_patrol(self, run_patrol_trace):
+        from tests.sim_validation.test_legal_moves import validate_legal_moves
 
-        assert summary.passed, (
-            f"Legal moves (deque) mismatch: {summary.total_java_only_hexes} java-only + "
-            f"{summary.total_sim_only_hexes} sim-only hexes "
-            f"(hex_match={summary.hex_match_rate:.1%}, "
-            f"move_match={summary.move_match_rate:.1%})"
+        trace = run_patrol_trace
+        failures = []
+        validated = 0
+
+        for step in trace.steps:
+            obs = step.raw_obs
+            if obs.get("terminated") or obs.get("truncated"):
+                continue
+            if not obs.get("legal_moves"):
+                continue
+
+            active_id = obs.get("active_entity_id", -1)
+            owner = trace.entity_owners.get(active_id, -1)
+            if owner < 0:
+                continue
+
+            result = validate_legal_moves(obs, owner, step.step_idx,
+                                            algorithm="deque")
+            if result.skipped_partial_move:
+                continue
+            validated += 1
+            if not result.passed:
+                failures.append(
+                    f"step {step.step_idx} entity {active_id} at "
+                    f"({result.unit_pos[0]},{result.unit_pos[1]},f={result.unit_pos[2]}): "
+                    f"{len(result.java_only_hexes)} java-only hexes, "
+                    f"{len(result.sim_only_hexes)} sim-only hexes, "
+                    f"{len(result.java_only_moves)} java-only moves, "
+                    f"{len(result.sim_only_moves)} sim-only moves"
+                )
+
+        assert validated > 0, "No movement steps validated"
+        assert not failures, (
+            f"{len(failures)}/{validated} steps failed.\n"
+            + "\n".join(failures[:10])
         )
 
 
