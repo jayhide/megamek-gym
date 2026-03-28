@@ -619,30 +619,41 @@ def compute_terrain_modifier(board: Board, x1: int, y1: int,
 
 
 class LosTable:
-    """Precomputed LOS lookup table for all hex pairs on a board."""
+    """Precomputed LOS + terrain modifier lookup table for all hex pairs."""
 
     def __init__(self, board: Board) -> None:
         self.board = board
         w, h = board.width, board.height
-        # Store as flat boolean array for speed
-        self._table = [False] * (w * h * w * h)
+        size = w * h * w * h
+        # Parallel flat arrays: LOS boolean + terrain modifier int
+        self._los = [False] * size
+        self._mod = [0] * size
         self._w = w
         self._h = h
         self._compute()
 
     def _compute(self) -> None:
         w, h = self._w, self._h
+        board = self.board
         for y1 in range(h):
             for x1 in range(w):
                 idx1 = y1 * w + x1
                 for y2 in range(h):
                     for x2 in range(w):
                         idx2 = y2 * w + x2
-                        self._table[idx1 * w * h + idx2] = compute_los(
-                            self.board, x1, y1, x2, y2
+                        flat = idx1 * w * h + idx2
+                        self._los[flat] = compute_los(board, x1, y1, x2, y2)
+                        self._mod[flat] = compute_terrain_modifier(
+                            board, x1, y1, x2, y2
                         )
 
     def has_los(self, x1: int, y1: int, x2: int, y2: int) -> bool:
         idx1 = y1 * self._w + x1
         idx2 = y2 * self._w + x2
-        return self._table[idx1 * self._w * self._h + idx2]
+        return self._los[idx1 * self._w * self._h + idx2]
+
+    def terrain_modifier(self, x1: int, y1: int, x2: int, y2: int) -> int:
+        """Cached terrain to-hit modifier for firing from (x1,y1) to (x2,y2)."""
+        idx1 = y1 * self._w + x1
+        idx2 = y2 * self._w + x2
+        return self._mod[idx1 * self._w * self._h + idx2]

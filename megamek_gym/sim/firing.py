@@ -100,10 +100,9 @@ def compute_to_hit(attacker: Unit, target: Unit, weapon: WeaponData,
     # Heat modifier
     tn += attacker.gunnery_modifier
 
-    # Terrain modifier (woods at target hex)
-    from megamek_gym.sim.los import compute_terrain_modifier
-    tn += compute_terrain_modifier(board, attacker.x, attacker.y,
-                                    target.x, target.y)
+    # Terrain modifier (cached in LOS table)
+    tn += los_table.terrain_modifier(attacker.x, attacker.y,
+                                     target.x, target.y)
 
     # Attacker prone: leg weapons impossible, arm-destroyed blocks all
     if attacker.prone:
@@ -131,8 +130,7 @@ def compute_to_hit(attacker: Unit, target: Unit, weapon: WeaponData,
     tn += attacker.arm_actuator_modifier(weapon.location)
 
     # Sensor damage modifier (+2 per sensor hit, standard cockpit)
-    if attacker.sensor_hits > 0:
-        tn += 2
+    tn += attacker.sensor_hits * 2
 
     # Spotting for indirect fire: +1 penalty
     if getattr(attacker, 'spotting', False):
@@ -215,6 +213,11 @@ def resolve_firing(attacker: Unit, target: Unit, board: Board,
     total_damage = 0
     total_heat = 0
     hits: list[dict] = []
+
+    # Sensors destroyed: cannot fire at all
+    if attacker.sensor_hits >= 2:
+        return {"attacker": attacker.entity_id, "target": target.entity_id,
+                "heat_generated": 0, "total_damage": 0, "hits": []}
 
     # Find all fireable weapons
     fireable = []
@@ -368,6 +371,7 @@ def apply_damage(target: Unit, loc: Location, damage: int,
         else:
             break
 
+    target.damage_this_phase += total_applied
     return total_applied
 
 
@@ -498,15 +502,20 @@ def _apply_critical(target: Unit, loc: Location,
                 target.destroyed = True
         elif crit_idx == "gyro":
             target.gyro_hits += 1
-            # 1 gyro hit: harder piloting, 2 = fall
             if target.gyro_hits >= 2:
-                target.prone = True
+                # Gyro destroyed: automatic fall
+                target.pending_psrs.append(("gyro destroyed", None))
+            else:
+                # First gyro hit: PSR with +3 modifier
+                target.pending_psrs.append(("gyro hit", 3))
         elif crit_idx == "hip":
             leg_idx = 0 if loc == Location.RL else 1
             target.hip_hits[leg_idx] = True
+            target.pending_psrs.append(("hip actuator hit", 2))
         elif crit_idx == "leg_actuator":
             leg_idx = 0 if loc == Location.RL else 1
             target.leg_actuator_hits[leg_idx] = min(3, target.leg_actuator_hits[leg_idx] + 1)
+            target.pending_psrs.append(("leg actuator hit", 1))
         elif crit_idx == "shoulder":
             arm_idx = 0 if loc == Location.RA else 1
             target.shoulder_destroyed[arm_idx] = True
@@ -538,9 +547,9 @@ def _destroy_location(target: Unit, loc: Location) -> None:
         if a.location == loc:
             target.ammo_remaining[i] = 0
 
-    # Leg destruction causes falling
+    # Leg destruction causes automatic fall
     if loc in (Location.RL, Location.LL):
-        target.prone = True
+        target.pending_psrs.append(("leg destroyed", None))
 
     # If both legs destroyed, mech is destroyed
     if target.loc_destroyed[Location.RL] and target.loc_destroyed[Location.LL]:

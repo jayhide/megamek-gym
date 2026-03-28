@@ -17,6 +17,9 @@ def apply_heat(unit: Unit, heat_generated: int) -> None:
     if unit.movement_type == "run":
         heat_generated += 2
 
+    # Engine damage: +5 heat per damaged engine slot (fusion only)
+    heat_generated += 5 * unit.engine_hits
+
     unit.heat += heat_generated
 
 

@@ -22,7 +22,9 @@ import heapq
 import math
 from typing import TYPE_CHECKING
 
-from megamek_gym.sim.board import Board, Terrain, WIDTH, HEIGHT, neighbor
+from megamek_gym.sim.board import (
+    BOARD, Board, Terrain, WIDTH, HEIGHT, neighbor, _NEIGHBOR_TABLE,
+)
 
 
 if TYPE_CHECKING:
@@ -70,6 +72,28 @@ def _hex_mp_cost(board: Board, from_x: int, from_y: int,
     diff = abs(board.elevation(to_x, to_y) - board.elevation(from_x, from_y))
     cost += diff
     return cost
+
+
+# ---------------------------------------------------------------------------
+# Precomputed MP cost and elevation diff tables for BFS inner loops.
+# _MP_COST_TABLE[x][y][d] = MP cost to enter neighbor in direction d (-1 = impassable, -2 = OOB)
+# _ELEV_DIFF_TABLE[x][y][d] = abs(elevation diff) to neighbor in direction d (0 if OOB)
+# ---------------------------------------------------------------------------
+def _build_cost_tables(board: Board) -> tuple[list, list]:
+    mp_cost = [[[-2] * 6 for _ in range(HEIGHT)] for _ in range(WIDTH)]
+    elev_diff = [[[0] * 6 for _ in range(HEIGHT)] for _ in range(WIDTH)]
+    for x in range(WIDTH):
+        for y in range(HEIGHT):
+            for d in range(6):
+                nx, ny = _NEIGHBOR_TABLE[x][y][d]
+                if nx < 0:
+                    continue  # OOB stays -2
+                mp_cost[x][y][d] = _hex_mp_cost(board, x, y, nx, ny)
+                elev_diff[x][y][d] = abs(board.elevation(nx, ny) - board.elevation(x, y))
+    return mp_cost, elev_diff
+
+
+_MP_COST_TABLE, _ELEV_DIFF_TABLE = _build_cost_tables(BOARD)
 
 
 def _psr_success_prob(target: int) -> float:
@@ -229,8 +253,9 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
     turn_cost = 0 if free_turns else 1
 
     # Output dicts: track best path per Java's criterion (max hexes, then PSR)
-    best_walk: dict[tuple[int, int, int], tuple[int, int, float]] = {}
-    best_run: dict[tuple[int, int, int], tuple[int, int, float]] = {}
+    # Values: (mp, hexes_moved, psr, path) where path is tuple of (x,y) hexes entered
+    best_walk: dict[tuple[int, int, int], tuple[int, int, float, tuple]] = {}
+    best_run: dict[tuple[int, int, int], tuple[int, int, float, tuple]] = {}
 
     # Multi-objective exploration: track (min_mp, max_hm) per state per
     # category. Re-explore when either objective improves. Bounded by
@@ -242,17 +267,18 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
     max_hm_run: dict[tuple[int, int, int], int] = {}
 
     facings = start_facings if start_facings is not None else [start_facing]
-    queue: list[tuple[int, int, int, int, int, float]] = []
+    # State: (cx, cy, cf, mp, hm, psr, path)
+    queue: list[tuple[int, int, int, int, int, float, tuple]] = []
     for sf in facings:
         key = (start_x, start_y, sf)
-        best_walk[key] = (0, 0, 1.0)
+        best_walk[key] = (0, 0, 1.0, ())
         min_mp_walk[key] = 0
         max_hm_walk[key] = 0
-        queue.append((start_x, start_y, sf, 0, 0, 1.0))
+        queue.append((start_x, start_y, sf, 0, 0, 1.0, ()))
     qi = 0
 
     while qi < len(queue):
-        cx, cy, cf, mp, hm, psr = queue[qi]
+        cx, cy, cf, mp, hm, psr, path = queue[qi]
         qi += 1
 
         # --- TURN transitions ---
@@ -270,7 +296,7 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
             # Update output dict (best path for this walk/run category)
             existing = best.get(key)
             if existing is None or _is_better_output(hm, psr, existing[1], existing[2]):
-                best[key] = (new_mp, hm, psr)
+                best[key] = (new_mp, hm, psr, path)
 
             # Re-explore if cheaper MP or more hexes (multi-objective gate)
             prev_min = min_mp_d.get(key)
@@ -283,30 +309,30 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
                 max_hm_d[key] = hm
                 should_explore = True
             if should_explore:
-                queue.append((cx, cy, new_facing, new_mp, hm, psr))
+                queue.append((cx, cy, new_facing, new_mp, hm, psr, path))
 
         # --- FORWARD transition (move in facing direction) ---
-        nx, ny = neighbor(cx, cy, cf)
-        if not (0 <= nx < WIDTH and 0 <= ny < HEIGHT):
+        nx, ny = _NEIGHBOR_TABLE[cx][cy][cf]
+        if nx < 0:
             continue
 
         # Can't enter enemy-occupied hex (MoveStep.java:3396-3401)
         if blocked_hex is not None and (nx, ny) == blocked_hex:
             continue
 
-        cost = _hex_mp_cost(board, cx, cy, nx, ny)
+        cost = _MP_COST_TABLE[cx][cy][cf]
         if cost < 0:
-            continue  # Impassable
+            continue  # Impassable or OOB
 
         new_mp = mp + cost
         if new_mp > run_mp:
             continue
 
         new_psr = psr
-        elev_diff = abs(board.elevation(nx, ny) - board.elevation(cx, cy))
-        if elev_diff >= 2:
+        if _ELEV_DIFF_TABLE[cx][cy][cf] >= 2:
             new_psr *= _PSR_PROBS.get(piloting, 0.0)
 
+        new_path = path + ((nx, ny),)
         new_hm = hm + 1
         key = (nx, ny, cf)  # After FORWARD, facing stays the same
         is_run = new_mp > walk_mp
@@ -317,7 +343,7 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
         # Update output dict (best path for this walk/run category)
         existing = best.get(key)
         if existing is None or _is_better_output(new_hm, new_psr, existing[1], existing[2]):
-            best[key] = (new_mp, new_hm, new_psr)
+            best[key] = (new_mp, new_hm, new_psr, new_path)
 
         # Re-explore if cheaper MP or more hexes (multi-objective gate)
         prev_min = min_mp_d.get(key)
@@ -330,7 +356,7 @@ def _facing_bfs(board: Board, start_x: int, start_y: int, start_facing: int,
             max_hm_d[key] = new_hm
             should_explore = True
         if should_explore:
-            queue.append((nx, ny, cf, new_mp, new_hm, new_psr))
+            queue.append((nx, ny, cf, new_mp, new_hm, new_psr, new_path))
 
     return best_walk, best_run
 
@@ -416,8 +442,9 @@ def _facing_bfs_deque(board: Board, start_x: int, start_y: int,
     eff_run_mp = walk_mp if backward else run_mp
 
     # Output dicts (best path per walk/run, using isBetterPath criterion)
-    best_walk: dict[tuple[int, int, int], tuple[int, int, float]] = {}
-    best_run: dict[tuple[int, int, int], tuple[int, int, float]] = {}
+    # Values: (mp, hexes_moved, psr, path) where path is tuple of (x,y) hexes entered
+    best_walk: dict[tuple[int, int, int], tuple[int, int, float, tuple]] = {}
+    best_run: dict[tuple[int, int, int], tuple[int, int, float, tuple]] = {}
 
     # Per-node Pareto deques: (x,y,facing) -> list[(mp, hm, psr)]
     # Sorted by mp ascending; each entry has strictly more hm than prior.
@@ -440,14 +467,15 @@ def _facing_bfs_deque(board: Board, start_x: int, start_y: int,
     # entries pop first, matching Java's PriorityQueue approximately-FIFO
     # behavior for comparator-equal entries.
     seq = 0
+    # Heap entries: (mp, -hm, seq, cx, cy, cf, psr, step_type, consec, path)
     heap: list = []
     for sf in facings:
-        heap.append((0, 0, seq, start_x, start_y, sf, 1.0, initial_step, 0))
+        heap.append((0, 0, seq, start_x, start_y, sf, 1.0, initial_step, 0, ()))
         seq += 1
     heapq.heapify(heap)
 
     while heap:
-        mp, neg_hm, _seq, cx, cy, cf, psr, last_step, consec = heapq.heappop(heap)
+        mp, neg_hm, _seq, cx, cy, cf, psr, last_step, consec, path = heapq.heappop(heap)
         hm = -neg_hm
         key = (cx, cy, cf)
 
@@ -468,7 +496,7 @@ def _facing_bfs_deque(board: Board, start_x: int, start_y: int,
         existing = best.get(key)
         if existing is None or _is_better_output(hm, psr,
                                                  existing[1], existing[2]):
-            best[key] = (mp, hm, psr)
+            best[key] = (mp, hm, psr, path)
 
         # --- Generate neighbor candidates and push unconditionally ---
         # Matches Java: accepted path generates neighbors, all pushed to queue.
@@ -502,7 +530,7 @@ def _facing_bfs_deque(board: Board, start_x: int, start_y: int,
                 seq += 1
                 heapq.heappush(heap, (
                     new_mp_t, -hm, seq, cx, cy, (cf + 1) % 6, psr,
-                    step_type, new_consec,
+                    step_type, new_consec, path,
                 ))
 
         # TURN_LEFT (facing - 1 = facing + 5)
@@ -517,33 +545,31 @@ def _facing_bfs_deque(board: Board, start_x: int, start_y: int,
                 seq += 1
                 heapq.heappush(heap, (
                     new_mp_t, -hm, seq, cx, cy, (cf + 5) % 6, psr,
-                    step_type, new_consec,
+                    step_type, new_consec, path,
                 ))
 
         # FORWARD / BACKWARD movement (clears hasJustStood)
-        if backward:
-            nx, ny = neighbor(cx, cy, (cf + 3) % 6)
-        else:
-            nx, ny = neighbor(cx, cy, cf)
+        move_dir = (cf + 3) % 6 if backward else cf
+        nx, ny = _NEIGHBOR_TABLE[cx][cy][move_dir]
 
-        if 0 <= nx < WIDTH and 0 <= ny < HEIGHT:
+        if nx >= 0:
             if blocked_hex is not None and (nx, ny) == blocked_hex:
                 pass  # skip — can't enter enemy-occupied hex (MoveStep:3396)
-            elif backward and board.elevation(nx, ny) != board.elevation(cx, cy):
-                pass  # skip — movement impossible
+            elif backward and _ELEV_DIFF_TABLE[cx][cy][move_dir] != 0:
+                pass  # skip — backward movement impossible across elevation change
             else:
-                cost = _hex_mp_cost(board, cx, cy, nx, ny)
+                cost = _MP_COST_TABLE[cx][cy][move_dir]
                 if cost >= 0:
                     new_mp_f = mp + cost
                     if new_mp_f <= eff_run_mp:
                         new_psr = psr
-                        elev_diff = abs(board.elevation(nx, ny) - board.elevation(cx, cy))
-                        if elev_diff >= 2:
+                        if _ELEV_DIFF_TABLE[cx][cy][move_dir] >= 2:
                             new_psr *= _PSR_PROBS.get(piloting, 0.0)
+                        new_path = path + ((nx, ny),)
                         seq += 1
                         heapq.heappush(heap, (
                             new_mp_f, -(hm + 1), seq, nx, ny, cf, new_psr,
-                            _STEP_FORWARD, 0,
+                            _STEP_FORWARD, 0, new_path,
                         ))
 
     return best_walk, best_run
@@ -557,10 +583,12 @@ def _emit_walk_run(moves: list[dict], key: tuple[int, int, int],
         run_data = None
     if walk_data:
         moves.append({"dest_x": x, "dest_y": y, "facing": f, "mp_used": walk_data[0],
-                       "hexes_moved": walk_data[1], "success_probability": walk_data[2]})
+                       "hexes_moved": walk_data[1], "success_probability": walk_data[2],
+                       "path": walk_data[3]})
     if run_data:
         moves.append({"dest_x": x, "dest_y": y, "facing": f, "mp_used": run_data[0],
-                       "hexes_moved": run_data[1], "success_probability": run_data[2]})
+                       "hexes_moved": run_data[1], "success_probability": run_data[2],
+                       "path": run_data[3]})
 
 
 def _enumerate_standing_moves(unit: Unit, board: Board,
@@ -599,7 +627,7 @@ def _enumerate_standing_moves(unit: Unit, board: Board,
     # Standing still at current position (original facing only, matching Java's
     # empty MovePath which preserves entity facing)
     moves.append({"dest_x": unit.x, "dest_y": unit.y, "facing": unit.facing, "mp_used": 0,
-                   "hexes_moved": 0, "success_probability": 1.0})
+                   "hexes_moved": 0, "success_probability": 1.0, "path": ()})
 
     # Collect all reachable (x, y, facing) with walk/run dedup
     # Group by (x, y, facing) to apply the run-only-if-more-hexes filter
@@ -613,14 +641,16 @@ def _enumerate_standing_moves(unit: Unit, board: Board,
             walk_data = best_walk.get(key)
             if walk_data and walk_data[0] > 0:
                 moves.append({"dest_x": x, "dest_y": y, "facing": f, "mp_used": walk_data[0],
-                               "hexes_moved": walk_data[1], "success_probability": walk_data[2]})
+                               "hexes_moved": walk_data[1], "success_probability": walk_data[2],
+                               "path": walk_data[3]})
             # Run data at start hex unlikely but handle it
             run_data = best_run.get(key)
             if run_data and run_data[0] > 0:
                 walk_hm = walk_data[1] if walk_data else -1
                 if run_data[1] > walk_hm:
                     moves.append({"dest_x": x, "dest_y": y, "facing": f, "mp_used": run_data[0],
-                                   "hexes_moved": run_data[1], "success_probability": run_data[2]})
+                                   "hexes_moved": run_data[1], "success_probability": run_data[2],
+                                   "path": run_data[3]})
             continue
 
         walk_data = best_walk.get(key)
@@ -633,10 +663,12 @@ def _enumerate_standing_moves(unit: Unit, board: Board,
 
         if walk_data:
             moves.append({"dest_x": x, "dest_y": y, "facing": f, "mp_used": walk_data[0],
-                           "hexes_moved": walk_data[1], "success_probability": walk_data[2]})
+                           "hexes_moved": walk_data[1], "success_probability": walk_data[2],
+                           "path": walk_data[3]})
         if run_data:
             moves.append({"dest_x": x, "dest_y": y, "facing": f, "mp_used": run_data[0],
-                           "hexes_moved": run_data[1], "success_probability": run_data[2]})
+                           "hexes_moved": run_data[1], "success_probability": run_data[2],
+                           "path": run_data[3]})
 
     return moves
 
@@ -657,7 +689,7 @@ def _build_moves_deque(unit: Unit,
 
     # Java: paths.add(new MovePath(game, entity)) — empty path, original facing
     moves.append({"dest_x": sx, "dest_y": sy, "facing": sf, "mp_used": 0,
-                   "hexes_moved": 0, "success_probability": 1.0})
+                   "hexes_moved": 0, "success_probability": 1.0, "path": ()})
 
     # Collect all keys across both passes
     all_keys = set(fwd_w) | set(fwd_r) | set(bwd_w) | set(bwd_r)
@@ -695,7 +727,7 @@ def _enumerate_prone_moves(unit: Unit, board: Board,
 
     # Stay prone (stand still) — original facing only, matching Java's empty MovePath
     moves.append({"dest_x": unit.x, "dest_y": unit.y, "facing": unit.facing, "mp_used": 0,
-                   "hexes_moved": 0, "success_probability": 1.0})
+                   "hexes_moved": 0, "success_probability": 1.0, "path": ()})
 
     # GET_UP costs 2 MP (or 1 if run_mp == 1), matching Java's GetUpStep.java
     stand_cost = 1 if unit.run_mp == 1 else 2
@@ -713,7 +745,7 @@ def _enumerate_prone_moves(unit: Unit, board: Board,
             moves.append({
                 "dest_x": unit.x, "dest_y": unit.y, "facing": f,
                 "mp_used": stand_cost,
-                "hexes_moved": 0, "success_probability": 1.0,
+                "hexes_moved": 0, "success_probability": 1.0, "path": (),
             })
         return moves
 
@@ -768,6 +800,7 @@ def _enumerate_prone_moves(unit: Unit, board: Board,
                     "dest_x": x, "dest_y": y, "facing": f,
                     "mp_used": total_mp,
                     "hexes_moved": walk_data[1], "success_probability": walk_data[2],
+                    "path": walk_data[3],
                 })
         if run_data:
             total_mp = run_data[0] + stand_cost
@@ -775,6 +808,7 @@ def _enumerate_prone_moves(unit: Unit, board: Board,
                 "dest_x": x, "dest_y": y, "facing": f,
                 "mp_used": total_mp,
                 "hexes_moved": run_data[1], "success_probability": run_data[2],
+                "path": run_data[3],
             })
 
     return moves
@@ -804,6 +838,7 @@ def _build_prone_moves_deque(unit: Unit, stand_cost: int,
                         "dest_x": x, "dest_y": y, "facing": f,
                         "mp_used": total_mp,
                         "hexes_moved": w[1], "success_probability": w[2],
+                        "path": w[3],
                     })
             if r:
                 total_mp = r[0] + stand_cost
@@ -811,6 +846,7 @@ def _build_prone_moves_deque(unit: Unit, stand_cost: int,
                     "dest_x": x, "dest_y": y, "facing": f,
                     "mp_used": total_mp,
                     "hexes_moved": r[1], "success_probability": r[2],
+                    "path": r[3],
                 })
 
     return moves
@@ -819,5 +855,5 @@ def _build_prone_moves_deque(unit: Unit, stand_cost: int,
 def _stand_still_moves(unit: Unit) -> list[dict]:
     return [
         {"dest_x": unit.x, "dest_y": unit.y, "facing": unit.facing, "mp_used": 0,
-         "hexes_moved": 0, "success_probability": 1.0}
+         "hexes_moved": 0, "success_probability": 1.0, "path": ()}
     ]

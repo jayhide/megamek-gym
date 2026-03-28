@@ -82,33 +82,47 @@ _ODD_COL_DIRS = [
 ]
 
 
+# Precomputed neighbor table: _NEIGHBOR_TABLE[x][y][d] = (nx, ny)
+# Avoids per-call x%2 conditional + tuple creation.
+# Out-of-bounds neighbors stored as (-1, -1).
+_NEIGHBOR_TABLE: list[list[list[tuple[int, int]]]] = [
+    [
+        [
+            (
+                x + (_EVEN_COL_DIRS[d][0] if x % 2 == 0 else _ODD_COL_DIRS[d][0]),
+                y + (_EVEN_COL_DIRS[d][1] if x % 2 == 0 else _ODD_COL_DIRS[d][1]),
+            )
+            if (
+                0 <= x + (_EVEN_COL_DIRS[d][0] if x % 2 == 0 else _ODD_COL_DIRS[d][0]) < WIDTH
+                and 0 <= y + (_EVEN_COL_DIRS[d][1] if x % 2 == 0 else _ODD_COL_DIRS[d][1]) < HEIGHT
+            )
+            else (-1, -1)
+            for d in range(6)
+        ]
+        for y in range(HEIGHT)
+    ]
+    for x in range(WIDTH)
+]
+
+
 def neighbor(x: int, y: int, direction: int) -> tuple[int, int]:
-    """Get the neighbor hex in the given direction (0-5)."""
-    if x % 2 == 0:
-        dx, dy = _EVEN_COL_DIRS[direction]
-    else:
-        dx, dy = _ODD_COL_DIRS[direction]
-    return x + dx, y + dy
+    """Get the neighbor hex in the given direction (0-5).
+
+    Returns (-1, -1) for out-of-bounds neighbors.
+    """
+    return _NEIGHBOR_TABLE[x][y][direction]
 
 
 def neighbors(x: int, y: int) -> list[tuple[int, int]]:
     """Get all valid neighbor hexes."""
-    result = []
-    for d in range(6):
-        nx, ny = neighbor(x, y, d)
-        if 0 <= nx < WIDTH and 0 <= ny < HEIGHT:
-            result.append((nx, ny))
-    return result
+    row = _NEIGHBOR_TABLE[x][y]
+    return [nb for nb in row if nb[0] >= 0]
 
 
 def neighbors_with_dir(x: int, y: int) -> list[tuple[int, int, int]]:
     """Get all valid neighbor hexes with their direction."""
-    result = []
-    for d in range(6):
-        nx, ny = neighbor(x, y, d)
-        if 0 <= nx < WIDTH and 0 <= ny < HEIGHT:
-            result.append((nx, ny, d))
-    return result
+    row = _NEIGHBOR_TABLE[x][y]
+    return [(nb[0], nb[1], d) for d, nb in enumerate(row) if nb[0] >= 0]
 
 
 class Board:
@@ -118,6 +132,12 @@ class Board:
         self.width = WIDTH
         self.height = HEIGHT
         self._hexes = _parse_board()
+        # Flat array access for hot paths (avoids dict lookup + tuple key)
+        self._elev = [[0] * HEIGHT for _ in range(WIDTH)]
+        self._terr = [[int(Terrain.CLEAR)] * HEIGHT for _ in range(WIDTH)]
+        for (x, y), hd in self._hexes.items():
+            self._elev[x][y] = hd.elevation
+            self._terr[x][y] = int(hd.terrain)
 
     def get(self, x: int, y: int) -> HexData:
         return self._hexes.get((x, y), HexData(0, Terrain.CLEAR))
@@ -126,10 +146,10 @@ class Board:
         return 0 <= x < self.width and 0 <= y < self.height
 
     def elevation(self, x: int, y: int) -> int:
-        return self.get(x, y).elevation
+        return self._elev[x][y]
 
     def terrain(self, x: int, y: int) -> Terrain:
-        return self.get(x, y).terrain
+        return self._terr[x][y]
 
     def movement_cost(self, x: int, y: int) -> int:
         """Extra MP cost for terrain in this hex (added to base cost of 1)."""

@@ -250,6 +250,10 @@ class Unit:
     hip_hits: list = field(default_factory=lambda: [False, False])
     leg_actuator_hits: list = field(default_factory=lambda: [0, 0])
 
+    # Damage-induced fall tracking
+    damage_this_phase: int = 0
+    pending_psrs: list = field(default_factory=list)
+
     # Arm actuator damage (index 0=RA, 1=LA)
     shoulder_destroyed: list = field(default_factory=lambda: [False, False])
     upper_arm_destroyed: list = field(default_factory=lambda: [False, False])
@@ -286,6 +290,8 @@ class Unit:
         self.gyro_hits = 0
         self.hip_hits = [False, False]
         self.leg_actuator_hits = [0, 0]
+        self.damage_this_phase = 0
+        self.pending_psrs = []
         self.shoulder_destroyed = [False, False]
         self.upper_arm_destroyed = [False, False]
         self.lower_arm_destroyed = [False, False]
@@ -376,6 +382,8 @@ class Unit:
         self.moved_hexes = 0
         self.movement_type = "none"
         self.mp_used = 0
+        self.damage_this_phase = 0
+        self.pending_psrs = []
 
     def front_armor(self, loc: Location) -> int:
         return self.armor[loc][0]
@@ -444,6 +452,11 @@ class Unit:
             "retreated": False,
             "armor": armor_list,
             "weapons": weapons_list,
+            "crit_state": {
+                "engine_hits": self.engine_hits,
+                "gyro_hits": self.gyro_hits,
+                "sensor_hits": self.sensor_hits,
+            },
         }
 
     def has_ammo_for(self, weapon_idx: int) -> bool:
