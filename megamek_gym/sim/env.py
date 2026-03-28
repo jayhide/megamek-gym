@@ -198,6 +198,7 @@ class MegaMekSimEnv(gymnasium.Env):
         info: dict = {
             "n_legal_moves": self._n_legal_moves,
             "round": obs_dict.get("round", 0),
+            "phase": obs_dict.get("phase", "MOVEMENT"),
             "action_mask": self.action_masks(),
         }
         if obs_dict.get("terminated") or obs_dict.get("truncated"):

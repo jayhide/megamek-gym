@@ -1,4 +1,5 @@
 import argparse
+import dataclasses
 from distutils.util import strtobool
 import random
 
@@ -6,7 +7,7 @@ import numpy as np
 import torch
 import gymnasium as gym
 
-from megamek_gym.agent import Agent, HierarchicalAgent, load_agent, load_hierarchical_agent, select_action, OUTCOME_MAP
+from megamek_gym.agent import Agent, HierarchicalAgent, load_agent, load_config_from_checkpoint, load_hierarchical_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
 
 
@@ -88,7 +89,16 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # Create environment
-    cfg = MegaMekConfig.load(args.config) if args.config else MegaMekConfig()
+    if args.config:
+        cfg = MegaMekConfig.load(args.config)
+    elif args.checkpoint and not args.random:
+        # Reconstruct config from checkpoint so env matches the trained agent
+        ckpt_config = load_config_from_checkpoint(args.checkpoint)
+        valid_fields = {f.name for f in dataclasses.fields(MegaMekConfig)}
+        ckpt_config = {k: v for k, v in ckpt_config.items() if k in valid_fields}
+        cfg = MegaMekConfig(**ckpt_config)
+    else:
+        cfg = MegaMekConfig()
     cfg.megamek_dir = args.megamek_dir
     cfg.rl_port = args.port
     cfg.env_index = 0

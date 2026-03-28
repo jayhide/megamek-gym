@@ -140,6 +140,8 @@ if __name__ == "__main__":
     batch_size = cfg.num_envs * cfg.num_steps
     minibatch_size = batch_size // cfg.num_minibatches
 
+    if cfg.seed is None:
+        cfg.seed = np.random.default_rng().integers(0, 2**31)
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)

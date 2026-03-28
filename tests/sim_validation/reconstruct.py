@@ -23,6 +23,7 @@ def reconstruct_unit(java_unit_dict: dict, template_name: str = "Trebuchet TBT-5
     # Status
     unit.heat = java_unit_dict.get("heat", 0)
     unit.prone = java_unit_dict.get("prone", False)
+    unit.shutdown = java_unit_dict.get("shutdown", False)
     unit.destroyed = java_unit_dict.get("destroyed", False)
 
     # Armor: Java obs has per-location dicts
@@ -48,7 +49,90 @@ def reconstruct_unit(java_unit_dict: dict, template_name: str = "Trebuchet TBT-5
         if i < len(unit.weapon_destroyed):
             unit.weapon_destroyed[i] = jw.get("destroyed", False)
 
+    # Crit state (from writeCritState in ObservationBuilder)
+    crit = java_unit_dict.get("crit_state")
+    if crit:
+        unit.engine_hits = crit.get("engine_hits", 0)
+        unit.gyro_hits = crit.get("gyro_hits", 0)
+        unit.sensor_hits = crit.get("sensor_hits", 0)
+        unit.life_support_hits = crit.get("life_support_hits", 0)
+
+        rl = crit.get("right_leg", {})
+        ll = crit.get("left_leg", {})
+        unit.hip_hits = [rl.get("hip_hits", 0) > 0, ll.get("hip_hits", 0) > 0]
+        # Sum upper_leg + lower_leg + foot hits per leg (sim tracks as single counter)
+        unit.leg_actuator_hits = [
+            rl.get("upper_leg_hits", 0) + rl.get("lower_leg_hits", 0) + rl.get("foot_hits", 0),
+            ll.get("upper_leg_hits", 0) + ll.get("lower_leg_hits", 0) + ll.get("foot_hits", 0),
+        ]
+
+        ra = crit.get("right_arm", {})
+        la = crit.get("left_arm", {})
+        unit.shoulder_destroyed = [ra.get("shoulder_hits", 0) > 0, la.get("shoulder_hits", 0) > 0]
+        unit.upper_arm_destroyed = [ra.get("upper_arm_hits", 0) > 0, la.get("upper_arm_hits", 0) > 0]
+        unit.lower_arm_destroyed = [ra.get("lower_arm_hits", 0) > 0, la.get("lower_arm_hits", 0) > 0]
+
+        unit.heat_sinks_destroyed = crit.get("heat_sinks_destroyed", 0)
+
+    # Ammo state (from writeAmmo in ObservationBuilder)
+    java_ammo = java_unit_dict.get("ammo", [])
+    for i, ja in enumerate(java_ammo):
+        if i < len(unit.ammo_remaining):
+            unit.ammo_remaining[i] = ja.get("shots_remaining", 0)
+
+    # Override walk MP from Java's reported value (accounts for heat/damage
+    # effects that the sim may not model identically)
+    java_walk = java_unit_dict.get("mp_walk")
+    if java_walk is not None:
+        unit._mp_walk_override = java_walk
+
     return unit
+
+
+_JAVA_MOVED_TO_PYTHON = {
+    "MOVE_WALK": "walk",
+    "MOVE_RUN": "run",
+    "MOVE_NONE": "none",
+    "MOVE_SPRINT": "run",  # treat sprint as run for modifier purposes
+}
+
+
+def set_firing_state(unit: Unit, firing_entity: dict) -> None:
+    """Override unit state with firing-time values from firing_report.
+
+    The firing_report captures position/movement/heat at the start of the
+    firing phase (post-movement, pre-firing).  This ensures compute_to_hit()
+    uses the same inputs as Java's WeaponAttackAction.toHit().
+    """
+    unit.x = firing_entity["x"]
+    unit.y = firing_entity["y"]
+    unit.facing = firing_entity["facing"]
+    unit.moved_hexes = firing_entity["delta_distance"]
+    unit.heat = firing_entity["heat"]
+    moved = firing_entity["moved"]
+    unit.movement_type = _JAVA_MOVED_TO_PYTHON.get(moved, "none")
+
+    # Prone flag at firing time (may differ from obs dict if unit stood up)
+    if "prone" in firing_entity:
+        unit.prone = firing_entity["prone"]
+
+    # Target immobile flag (from Java's Entity.isImmobile())
+    unit.immobile = firing_entity.get("immobile", False)
+    unit.spotting = firing_entity.get("spotting", False)
+
+    # Arm actuator damage
+    if "ra_shoulder_destroyed" in firing_entity:
+        unit.shoulder_destroyed[0] = firing_entity["ra_shoulder_destroyed"]
+        unit.upper_arm_destroyed[0] = firing_entity["ra_upper_arm_destroyed"]
+        unit.lower_arm_destroyed[0] = firing_entity["ra_lower_arm_destroyed"]
+    if "la_shoulder_destroyed" in firing_entity:
+        unit.shoulder_destroyed[1] = firing_entity["la_shoulder_destroyed"]
+        unit.upper_arm_destroyed[1] = firing_entity["la_upper_arm_destroyed"]
+        unit.lower_arm_destroyed[1] = firing_entity["la_lower_arm_destroyed"]
+
+    # Sensor damage (for to-hit modifier)
+    if "sensor_hits" in firing_entity:
+        unit.sensor_hits = firing_entity["sensor_hits"]
 
 
 def extract_unit_state(raw_obs: dict, owner_id: int) -> dict | None:
@@ -57,6 +141,22 @@ def extract_unit_state(raw_obs: dict, owner_id: int) -> dict | None:
         if u.get("owner") == owner_id:
             return u
     return None
+
+
+def extract_crit_state(raw_obs: dict, owner_id: int) -> dict | None:
+    """Extract the crit_state dict for a given owner from a raw observation."""
+    unit = extract_unit_state(raw_obs, owner_id)
+    if unit is None:
+        return None
+    return unit.get("crit_state")
+
+
+def extract_ammo_state(raw_obs: dict, owner_id: int) -> list[dict] | None:
+    """Extract ammo bin state from a raw observation."""
+    unit = extract_unit_state(raw_obs, owner_id)
+    if unit is None:
+        return None
+    return unit.get("ammo")
 
 
 def compute_armor_deltas(prev_unit: dict, curr_unit: dict) -> list[dict]:

@@ -19,3 +19,4 @@ rl_deployment: false
 firing_strategy: princess
 step_timeout_seconds: 30
 max_game_rounds: 40
+force_gc: true

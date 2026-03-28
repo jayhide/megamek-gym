@@ -22,6 +22,7 @@ import numpy as np
 import megamek_gym  # noqa: F401 — registers env
 from megamek_gym.config import MegaMekConfig
 from megamek_gym.observation import (
+    _board_block_size,
     compute_obs_size,
     compute_obs_size_hierarchical,
     MOVE_FEATURES,
@@ -196,7 +197,6 @@ class TestFixedDeployment:
         )
         board_w = config.resolved_board_width
         board_h = config.resolved_board_height
-        board_size = board_w * board_h
 
         num_episodes = 2
         env = gymnasium.make("MegaMekGym/MegaMek-v0", config=config)
@@ -205,7 +205,7 @@ class TestFixedDeployment:
                 obs, info = env.reset()
 
                 # Check RL unit position
-                rl_state_start = board_size
+                rl_state_start = _board_block_size(board_w, board_h)
                 rl_x_norm = obs[rl_state_start]
                 rl_y_norm = obs[rl_state_start + 1]
                 actual_x = round(rl_x_norm * board_w)
@@ -365,9 +365,8 @@ class TestFeatureDistributions:
 
         board_w = config.resolved_board_width
         board_h = config.resolved_board_height
-        board_size = board_w * board_h
         max_moves = config.max_legal_moves
-        move_offset = board_size + 2 * UNIT_FEATURES + GLOBAL_FEATURES
+        move_offset = _board_block_size(board_w, board_h) + 2 * UNIT_FEATURES + GLOBAL_FEATURES
 
         constant_count = [0] * MOVE_FEATURES
         total_multi_move_steps = 0

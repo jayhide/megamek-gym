@@ -235,6 +235,7 @@ class Unit:
     prone: bool = False
     destroyed: bool = False
     shutdown: bool = False
+    spotting: bool = False
 
     # Movement tracking (reset each turn)
     moved_hexes: int = 0
@@ -248,6 +249,15 @@ class Unit:
     # Leg actuator damage (index 0=RL, 1=LL)
     hip_hits: list = field(default_factory=lambda: [False, False])
     leg_actuator_hits: list = field(default_factory=lambda: [0, 0])
+
+    # Arm actuator damage (index 0=RA, 1=LA)
+    shoulder_destroyed: list = field(default_factory=lambda: [False, False])
+    upper_arm_destroyed: list = field(default_factory=lambda: [False, False])
+    lower_arm_destroyed: list = field(default_factory=lambda: [False, False])
+
+    # Head system damage
+    sensor_hits: int = 0
+    life_support_hits: int = 0
 
     def __post_init__(self) -> None:
         if not self.armor:
@@ -268,6 +278,7 @@ class Unit:
         self.prone = False
         self.destroyed = False
         self.shutdown = False
+        self.spotting = False
         self.moved_hexes = 0
         self.movement_type = "none"
         self.mp_used = 0
@@ -275,6 +286,11 @@ class Unit:
         self.gyro_hits = 0
         self.hip_hits = [False, False]
         self.leg_actuator_hits = [0, 0]
+        self.shoulder_destroyed = [False, False]
+        self.upper_arm_destroyed = [False, False]
+        self.lower_arm_destroyed = [False, False]
+        self.sensor_hits = 0
+        self.life_support_hits = 0
 
     def deploy(self, x: int, y: int, facing: int) -> None:
         self.x = x
@@ -294,7 +310,12 @@ class Unit:
         - Hip destroyed: MP = ceil(MP / 2) (applied per leg, sequentially)
         - Each non-hip actuator crit (upper leg, lower leg, foot): MP -= 1
         - Heat penalty: MP -= heat // 5
+
+        If _mp_walk_override is set (e.g. by reconstruct_unit from Java obs),
+        it is used directly, bypassing the damage/heat calculation.
         """
+        if hasattr(self, '_mp_walk_override') and self._mp_walk_override is not None:
+            return self._mp_walk_override
         mp = self.template.walk_mp
         for i, loc in enumerate((Location.RL, Location.LL)):
             if self.loc_destroyed[loc]:
@@ -328,6 +349,23 @@ class Unit:
         elif self.heat >= 8:
             return 1
         return 0
+
+    def arm_actuator_modifier(self, loc: Location) -> int:
+        """To-hit modifier from arm actuator damage for weapons in the given location."""
+        if loc == Location.RA:
+            arm_idx = 0
+        elif loc == Location.LA:
+            arm_idx = 1
+        else:
+            return 0
+        if self.shoulder_destroyed[arm_idx]:
+            return 4
+        mod = 0
+        if self.upper_arm_destroyed[arm_idx]:
+            mod += 1
+        if self.lower_arm_destroyed[arm_idx]:
+            mod += 1
+        return mod
 
     def is_alive(self) -> bool:
         """Unit is still in the fight."""

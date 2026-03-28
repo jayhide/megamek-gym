@@ -343,10 +343,16 @@ class MegaMekEnv(gymnasium.Env):
         truncated = raw_obs.get("truncated", False)
 
         # Early termination: prone with destroyed leg(s) = unrecoverable
-        if not terminated and not truncated and self._check_early_termination(raw_obs):
+        early_term_outcome = (
+            self._check_early_termination(raw_obs)
+            if not terminated and not truncated
+            else None
+        )
+        if early_term_outcome is not None:
+            side = "RL unit" if early_term_outcome == "LOSS" else "enemy"
             logger.info(
-                "[port:%d] Early termination: RL unit is prone with destroyed leg(s)",
-                self._port,
+                "[port:%d] Early termination: %s is prone with destroyed leg(s)",
+                self._port, side,
             )
             # Send forfeit to Java so it can end the game cleanly
             # and we can use persistent reset instead of cold restart
@@ -361,7 +367,7 @@ class MegaMekEnv(gymnasium.Env):
                     self._port, e,
                 )
                 self._java_crashed = True  # fallback to cold restart
-            raw_obs["game_outcome"] = "LOSS"
+            raw_obs["game_outcome"] = early_term_outcome
             raw_obs["terminated"] = True
             terminated = True
             early_term = True
@@ -410,24 +416,36 @@ class MegaMekEnv(gymnasium.Env):
         info["java_crash"] = 1
         return self._last_flat_obs, 0.0, True, False, info
 
-    def _check_early_termination(self, raw_obs: dict) -> bool:
-        """Return True if RL unit is prone with at least one destroyed leg.
+    @staticmethod
+    def _is_hopeless(unit: dict) -> bool:
+        """Return True if a unit is prone with at least one destroyed leg."""
+        if not unit.get("prone", False):
+            return False
+        for loc in unit.get("armor", []):
+            if loc.get("location") in ("LL", "RL") and loc.get("internal", 1) <= 0:
+                return True
+        return False
 
-        A mech that is prone with a destroyed leg cannot stand, making it
-        effectively immobilized.  Ending the episode early avoids wasting
-        training time on hopeless states.
+    def _check_early_termination(self, raw_obs: dict) -> str | None:
+        """Check if either unit is prone with a destroyed leg.
+
+        Returns ``"LOSS"`` if the RL unit is crippled, ``"WIN"`` if the enemy
+        is crippled, or ``None`` if neither qualifies.  RL is checked first so
+        that if both are crippled, the result is a LOSS.
         """
         units = raw_obs.get("units", [])
+        rl_unit = None
+        enemy_unit = None
         for unit in units:
-            if unit.get("owner") != self._rl_owner_id:
-                continue
-            if not unit.get("prone", False):
-                return False
-            for loc in unit.get("armor", []):
-                if loc.get("location") in ("LL", "RL") and loc.get("internal", 1) <= 0:
-                    return True
-            return False
-        return False
+            if unit.get("owner") == self._rl_owner_id:
+                rl_unit = unit
+            else:
+                enemy_unit = unit
+        if rl_unit is not None and self._is_hopeless(rl_unit):
+            return "LOSS"
+        if enemy_unit is not None and self._is_hopeless(enemy_unit):
+            return "WIN"
+        return None
 
     def _build_info(self, raw_obs: dict) -> dict:
         # Gymnasium's AsyncVectorEnv._add_info cannot merge nested dicts/lists

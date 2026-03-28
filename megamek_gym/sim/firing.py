@@ -105,12 +105,38 @@ def compute_to_hit(attacker: Unit, target: Unit, weapon: WeaponData,
     tn += compute_terrain_modifier(board, attacker.x, attacker.y,
                                     target.x, target.y)
 
+    # Attacker prone: leg weapons impossible, arm-destroyed blocks all
+    if attacker.prone:
+        if weapon.location in (Location.RL, Location.LL):
+            return None
+        # Standard rules (TAC_OPS_PRONE_FIRE disabled): prone mech needs
+        # both arms to brace. If either arm destroyed, all weapons impossible.
+        if (attacker.loc_destroyed[Location.RA]
+                or attacker.loc_destroyed[Location.LA]):
+            return None
+        tn += 2
+
     # Target prone: harder to hit at range, easier up close
     if target.prone:
         if dist <= 1:
             tn -= 2  # Easier to hit prone target adjacent
         else:
             tn += 1  # Harder to hit prone target at range
+
+    # Target immobile: -4 modifier
+    if getattr(target, 'immobile', False) or target.shutdown:
+        tn -= 4
+
+    # Arm actuator damage modifier
+    tn += attacker.arm_actuator_modifier(weapon.location)
+
+    # Sensor damage modifier (+2 per sensor hit, standard cockpit)
+    if attacker.sensor_hits > 0:
+        tn += 2
+
+    # Spotting for indirect fire: +1 penalty
+    if getattr(attacker, 'spotting', False):
+        tn += 1
 
     # Clamp: 2 always misses, 12 always succeeds
     return max(2, tn)
@@ -201,12 +227,25 @@ def resolve_firing(attacker: Unit, target: Unit, board: Board,
             continue
         fireable.append(i)
 
+    # Prone arm restriction: biped can only fire arm weapons from one arm
+    prone_arm_fired: Location | None = None
+
     for wi in fireable:
         w = attacker.template.weapons[wi]
-        tn = compute_to_hit(attacker, target, w, board, los_table)
 
+        tn = compute_to_hit(attacker, target, w, board, los_table)
         if tn is None:
             continue
+
+        # Prone arm restriction: only one arm can fire, other braces.
+        # Check AFTER compute_to_hit so an arm is only claimed when
+        # a weapon on it will actually fire (matching Java's
+        # isFiringFromArmAlready which checks committed actions).
+        if attacker.prone and w.location in (Location.RA, Location.LA):
+            if prone_arm_fired is None:
+                prone_arm_fired = w.location
+            elif prone_arm_fired != w.location:
+                continue
 
         # Fire weapon — accumulate heat
         total_heat += w.heat
@@ -235,7 +274,8 @@ def resolve_firing(attacker: Unit, target: Unit, board: Board,
                 remaining -= min(remaining, 5)
 
                 loc, is_tac = roll_hit_location(side, r)
-                dmg_dealt = apply_damage(target, loc, group_damage, use_rear, r)
+                dmg_dealt = apply_damage(target, loc, group_damage, use_rear, r,
+                                         is_tac=is_tac)
                 total_damage += dmg_dealt
 
             hits.append({
@@ -245,7 +285,8 @@ def resolve_firing(attacker: Unit, target: Unit, board: Board,
         else:
             # Direct fire weapon
             loc, is_tac = roll_hit_location(side, r)
-            dmg_dealt = apply_damage(target, loc, w.damage, use_rear, r)
+            dmg_dealt = apply_damage(target, loc, w.damage, use_rear, r,
+                                     is_tac=is_tac)
             total_damage += dmg_dealt
 
             hits.append({
@@ -263,8 +304,12 @@ def resolve_firing(attacker: Unit, target: Unit, board: Board,
 
 
 def apply_damage(target: Unit, loc: Location, damage: int,
-                 rear: bool = False, rng: random.Random | None = None) -> int:
+                 rear: bool = False, rng: random.Random | None = None,
+                 is_tac: bool = False) -> int:
     """Apply damage to a specific location, with transfer.
+
+    If is_tac is True, a through-armor critical is guaranteed on the first
+    location that takes internal structure damage.
 
     Returns total damage actually applied.
     """
@@ -272,6 +317,7 @@ def apply_damage(target: Unit, loc: Location, damage: int,
     total_applied = 0
     remaining = damage
     current_loc = loc
+    tac_pending = is_tac  # TAC only applies to initial location
 
     while remaining > 0 and current_loc is not None:
         if target.loc_destroyed[current_loc]:
@@ -304,7 +350,8 @@ def apply_damage(target: Unit, loc: Location, damage: int,
             total_applied += absorbed
 
             # Critical hit check when internals are damaged
-            _check_critical(target, current_loc, r)
+            _check_critical(target, current_loc, r, is_tac=tac_pending)
+            tac_pending = False  # TAC consumed on first internal damage
 
         # Check if location is destroyed
         if target.armor[current_loc][2] <= 0:
@@ -325,15 +372,51 @@ def apply_damage(target: Unit, loc: Location, damage: int,
 
 
 def _check_critical(target: Unit, loc: Location,
-                    rng: random.Random) -> None:
-    """Roll for and apply critical hits when internal structure takes damage."""
-    # Simplified: 2d6, on 8+ a critical hit occurs
-    roll = d6(2, rng)
-    if roll < 8:
+                    rng: random.Random, is_tac: bool = False) -> None:
+    """Roll for and apply critical hits when internal structure takes damage.
+
+    Matches Java TW crit table: 8-9=1 crit, 10-11=2, 12=3 (head: blown off).
+    Through-armor crits (is_tac=True) guarantee 1 crit without rolling.
+    """
+    if is_tac:
+        _apply_critical(target, loc, rng)
         return
 
-    # Determine what gets hit
-    _apply_critical(target, loc, rng)
+    roll = d6(2, rng)
+    if roll <= 7:
+        return
+    elif roll <= 9:
+        num_crits = 1
+    elif roll <= 11:
+        num_crits = 2
+    else:
+        # Roll of 12: head blown off, otherwise 3 crits
+        if loc == Location.HD:
+            target.armor[loc][2] = 0
+            target.loc_destroyed[loc] = True
+            _destroy_location(target, loc)
+            target.destroyed = True
+            return
+        num_crits = 3
+
+    for _ in range(num_crits):
+        _apply_critical(target, loc, rng)
+
+
+def _ammo_explosion_damage(target: Unit, ammo_idx: int) -> int:
+    """Calculate per-round explosion damage for an ammo bin.
+
+    BattleTech rules: each round of ammo explodes for its full weapon damage.
+    For cluster weapons (SRM/LRM): rack_size * per_missile_damage.
+    For direct-fire weapons: weapon damage per round.
+    """
+    ammo_bin = target.template.ammo[ammo_idx]
+    for w in target.template.weapons:
+        if w.name == ammo_bin.weapon_name:
+            if w.is_cluster:
+                return w.cluster_size * w.damage
+            return w.damage
+    return 2  # Fallback
 
 
 def _apply_critical(target: Unit, loc: Location,
@@ -347,9 +430,12 @@ def _apply_critical(target: Unit, loc: Location,
     ammo_indices = [i for i, a in enumerate(target.template.ammo)
                     if a.location == loc and target.ammo_remaining[i] > 0]
 
-    # System crits (gyro in CT, engine in CT/RT/LT, actuators in legs)
+    # System crits (gyro in CT, engine in CT/RT/LT, actuators in legs/arms,
+    # cockpit/sensors/life_support in HD, heat sinks in torsos)
     system_options: list[str] = []
-    if loc == Location.CT:
+    if loc == Location.HD:
+        system_options.extend(["cockpit", "sensors", "life_support"])
+    elif loc == Location.CT:
         system_options.extend(["gyro", "engine"])
     elif loc in (Location.RT, Location.LT):
         system_options.append("engine")
@@ -359,6 +445,22 @@ def _apply_critical(target: Unit, loc: Location,
             system_options.append("hip")
         if target.leg_actuator_hits[leg_idx] < 3:
             system_options.append("leg_actuator")
+    elif loc in (Location.RA, Location.LA):
+        arm_idx = 0 if loc == Location.RA else 1
+        if not target.shoulder_destroyed[arm_idx]:
+            system_options.append("shoulder")
+        if not target.upper_arm_destroyed[arm_idx]:
+            system_options.append("upper_arm")
+        if not target.lower_arm_destroyed[arm_idx]:
+            system_options.append("lower_arm")
+
+    # Heat sinks as crit targets in torso locations
+    # (10 sinks are integral to the engine and not separately destroyable)
+    extra_sinks = target.template.heat_sinks - 10
+    if (loc in (Location.CT, Location.RT, Location.LT)
+            and extra_sinks > 0
+            and target.heat_sinks_destroyed < extra_sinks):
+        system_options.append("heat_sink")
 
     all_options = (
         [("weapon", i) for i in weapon_indices]
@@ -379,8 +481,8 @@ def _apply_critical(target: Unit, loc: Location,
         ammo_remaining = target.ammo_remaining[crit_idx]
         target.ammo_remaining[crit_idx] = 0
         if ammo_remaining > 0:
-            # Each SRM round does 2 damage, entire bin explodes
-            explosion_damage = ammo_remaining * 2
+            per_round = _ammo_explosion_damage(target, crit_idx)
+            explosion_damage = ammo_remaining * per_round
             # Apply to the location's internals directly
             internal = target.armor[loc][2]
             target.armor[loc][2] = max(0, internal - explosion_damage)
@@ -405,6 +507,23 @@ def _apply_critical(target: Unit, loc: Location,
         elif crit_idx == "leg_actuator":
             leg_idx = 0 if loc == Location.RL else 1
             target.leg_actuator_hits[leg_idx] = min(3, target.leg_actuator_hits[leg_idx] + 1)
+        elif crit_idx == "shoulder":
+            arm_idx = 0 if loc == Location.RA else 1
+            target.shoulder_destroyed[arm_idx] = True
+        elif crit_idx == "upper_arm":
+            arm_idx = 0 if loc == Location.RA else 1
+            target.upper_arm_destroyed[arm_idx] = True
+        elif crit_idx == "lower_arm":
+            arm_idx = 0 if loc == Location.RA else 1
+            target.lower_arm_destroyed[arm_idx] = True
+        elif crit_idx == "cockpit":
+            target.destroyed = True  # Pilot killed
+        elif crit_idx == "sensors":
+            target.sensor_hits += 1
+        elif crit_idx == "life_support":
+            target.life_support_hits += 1
+        elif crit_idx == "heat_sink":
+            target.heat_sinks_destroyed += 1
 
 
 def _destroy_location(target: Unit, loc: Location) -> None:

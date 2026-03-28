@@ -38,6 +38,10 @@ class LegalMoveResult:
     # Level 4: mp_used disagreements at shared (x, y, facing)
     mp_mismatches: list[str] = field(default_factory=list)
 
+    # Diagnostic data (populated for prone steps with extras)
+    _sim_moves: list[dict] = field(default_factory=list, repr=False)
+    _walk_mp: int = 0
+
     @property
     def hex_match_rate(self) -> float:
         total = self.shared_hexes + len(self.java_only_hexes) + len(self.sim_only_hexes)
@@ -82,8 +86,49 @@ class LegalMoveSummary:
         return self.total_java_only_hexes == 0 and self.total_sim_only_hexes == 0
 
 
+def diagnose_prone_extras(result: LegalMoveResult, sim_moves: list[dict],
+                          walk_mp: int) -> str:
+    """Return detailed diagnostic string for sim-only moves on a prone step."""
+    if not result.unit_prone or not result.sim_only_hexes:
+        return ""
+
+    sx, sy, sf = result.unit_pos
+    lines = [
+        f"  Prone step {result.step_idx} at ({sx},{sy},f={sf}) "
+        f"walk_mp={walk_mp}: {len(result.sim_only_hexes)} sim-only hexes"
+    ]
+
+    # Collect all sim moves that land on sim-only hexes
+    extras = []
+    for m in sim_moves:
+        if (m["dest_x"], m["dest_y"]) in result.sim_only_hexes:
+            dx, dy = m["dest_x"] - sx, m["dest_y"] - sy
+            dist = abs(dx) + abs(dy)  # rough manhattan; hex distance is close enough for diagnostics
+            is_run = m["mp_used"] > walk_mp
+            extras.append((m, dist, is_run))
+
+    # Sort by distance then mp
+    extras.sort(key=lambda e: (e[1], e[0]["mp_used"]))
+
+    n_run = sum(1 for _, _, r in extras if r)
+    n_walk = len(extras) - n_run
+    mp_values = sorted(set(e[0]["mp_used"] for e in extras))
+
+    for m, dist, is_run in extras:
+        tag = "RUN" if is_run else "WALK"
+        lines.append(
+            f"    ({m['dest_x']},{m['dest_y']},f={m['facing']}) "
+            f"mp={m['mp_used']} hm={m['hexes_moved']} "
+            f"psr={m.get('success_probability', 1.0):.2f} {tag} dist~{dist}"
+        )
+
+    lines.append(f"  Summary: {n_walk} walk + {n_run} run extras, mp_values={mp_values}")
+    return "\n".join(lines)
+
+
 def validate_legal_moves(java_obs: dict, rl_owner_id: int,
-                         step_idx: int = 0) -> LegalMoveResult:
+                         step_idx: int = 0,
+                         algorithm: str = "bfs") -> LegalMoveResult:
     """Compare Python-enumerated moves against Java legal_moves for one step."""
     result = LegalMoveResult(step_idx=step_idx)
 
@@ -105,18 +150,17 @@ def validate_legal_moves(java_obs: dict, rl_owner_id: int,
     # Reconstruct sim unit
     sim_unit = reconstruct_unit(java_unit, "Trebuchet TBT-5S")
 
-    # Get enemy for LOS (not needed for move enumeration, but passed through)
-    enemy_unit = None
+    # Reconstruct enemy unit for stacking violation check
+    sim_enemy = None
     for u in java_obs.get("units", []):
         if u.get("owner") != rl_owner_id:
-            enemy_unit = u
+            sim_enemy = reconstruct_unit(u, "Trebuchet TBT-5S")
             break
 
-    # Build a minimal enemy Unit for the sim (only position matters for
-    # move enumeration, but we pass None since enumerate_moves doesn't use
-    # the enemy for movement calculation)
-    sim_moves = enumerate_moves(sim_unit, BOARD, enemy=None)
+    sim_moves = enumerate_moves(sim_unit, BOARD, enemy=sim_enemy, algorithm=algorithm)
     result.sim_move_count = len(sim_moves)
+    result._sim_moves = sim_moves
+    result._walk_mp = sim_unit.walk_mp
 
     # --- Level 1: reachable hex set ---
     java_hexes = {(m["dest_x"], m["dest_y"]) for m in java_moves}
@@ -179,7 +223,8 @@ def validate_legal_moves(java_obs: dict, rl_owner_id: int,
     return result
 
 
-def validate_legal_moves_trace(trace_steps: list, rl_owner_id: int) -> LegalMoveSummary:
+def validate_legal_moves_trace(trace_steps: list, rl_owner_id: int,
+                               algorithm: str = "bfs") -> LegalMoveSummary:
     """Validate legal moves across all non-terminal steps in a game trace."""
     summary = LegalMoveSummary()
 
@@ -190,7 +235,8 @@ def validate_legal_moves_trace(trace_steps: list, rl_owner_id: int) -> LegalMove
         if not raw_obs.get("legal_moves"):
             continue
 
-        result = validate_legal_moves(raw_obs, rl_owner_id, step.step_idx)
+        result = validate_legal_moves(raw_obs, rl_owner_id, step.step_idx,
+                                     algorithm=algorithm)
         summary.per_step.append(result)
 
         summary.total_java_moves += result.java_move_count

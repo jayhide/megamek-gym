@@ -17,6 +17,63 @@ class UnitTemplateResult:
         return not self.mismatches
 
 
+@dataclass
+class InitialFacingResult:
+    mismatches: list[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return not self.mismatches
+
+
+def validate_initial_facing(
+    raw_obs: dict,
+    rl_owner_id: int,
+    rl_start: tuple[int, int] = (14, 1),
+    opp_start: tuple[int, int] = (1, 15),
+    template_name: str = "Trebuchet TBT-5S",
+) -> InitialFacingResult:
+    """Compare initial unit facings between sim Game and Java observation.
+
+    Creates a sim Game with the same starting positions, resets it, and
+    compares the resulting facings against the Java round-1 observation.
+    """
+    from megamek_gym.sim.game import Game
+
+    result = InitialFacingResult()
+
+    # Run sim game to get its initial facings
+    game = Game(
+        rl_unit_name=template_name,
+        opponent_unit_name=template_name,
+        rl_start=rl_start,
+        opp_start=opp_start,
+    )
+    game.reset()
+
+    # Extract Java unit facings from the observation
+    units = raw_obs.get("units", [])
+    for u in units:
+        owner = u.get("owner")
+        java_facing = u.get("facing")
+        if java_facing is None:
+            continue
+
+        if owner == rl_owner_id:
+            sim_facing = game.rl_unit.facing
+            label = "rl_unit"
+        else:
+            sim_facing = game.opp_unit.facing
+            label = "opp_unit"
+
+        if sim_facing != java_facing:
+            result.mismatches.append(
+                f"{label} facing: sim={sim_facing} java={java_facing}"
+            )
+
+    return result
+
+
 def validate_unit_template(java_unit_dict: dict,
                            template_name: str = "Trebuchet TBT-5S") -> UnitTemplateResult:
     """Compare sim unit template against Java unit at game start (round 1)."""
@@ -100,15 +157,17 @@ def validate_unit_template(java_unit_dict: dict,
             continue
 
         for sw, jw in zip(sim_list, java_list):
-            # Damage: Java sends -2 sentinel for cluster weapons (raw getDamage())
-            # and effective damage for direct-fire weapons
+            # Java serializes effective damage for all weapons:
+            # direct-fire: raw damage, cluster: rackSize * per-missile damage
             java_dmg = jw.get("damage", -1)
-            if java_dmg >= 0:  # Direct fire weapon
-                if java_dmg != sw.damage:
-                    result.mismatches.append(
-                        f"weapon '{sw.name}' damage: sim={sw.damage} java={java_dmg}"
-                    )
-            # For cluster weapons (java_dmg == -2), skip damage check
+            if sw.is_cluster:
+                expected = sw.damage * sw.cluster_size
+            else:
+                expected = sw.damage
+            if java_dmg >= 0 and java_dmg != expected:
+                result.mismatches.append(
+                    f"weapon '{sw.name}' damage: sim={expected} java={java_dmg}"
+                )
 
             # Ranges: Java sends Integer.MIN_VALUE for "no min range"
             for rng_name in ("short_range", "medium_range", "long_range"):

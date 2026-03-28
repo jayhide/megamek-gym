@@ -20,6 +20,9 @@ pytest = ">=7.0"
 [tool.poetry.plugins."gymnasium.envs"]
 __root__ = "megamek_gym:register_envs"
 
+[tool.poetry.plugins."pytest11"]
+megamek-gym = "megamek_gym.pytest_plugin"
+
 [tool.pytest.ini_options]
 markers = [
     "integration: smoke tests requiring a live JVM (deselected by default)",

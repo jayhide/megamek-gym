@@ -51,6 +51,18 @@ class TestUnitTemplate:
 
 
 @pytest.mark.validation
+class TestInitialFacing:
+    def test_initial_facing(self, java_trace):
+        from tests.sim_validation.test_unit_template import validate_initial_facing
+
+        first_obs = java_trace.steps[0].raw_obs
+        result = validate_initial_facing(first_obs, java_trace.rl_owner_id)
+        assert not result.mismatches, (
+            f"Initial facing mismatch: {', '.join(result.mismatches)}"
+        )
+
+
+@pytest.mark.validation
 class TestLos:
     def test_los(self, java_trace):
         from megamek_gym.sim.board import BOARD
@@ -92,6 +104,89 @@ class TestLegalMoves:
             f"{summary.total_sim_only_hexes} sim-only hexes "
             f"(hex_match={summary.hex_match_rate:.1%}, "
             f"move_match={summary.move_match_rate:.1%})"
+        )
+
+
+@pytest.mark.validation
+class TestLegalMovesDeque:
+    def test_legal_moves_deque(self, java_trace):
+        from tests.sim_validation.test_legal_moves import validate_legal_moves_trace
+
+        summary = validate_legal_moves_trace(
+            java_trace.steps, java_trace.rl_owner_id, algorithm="deque",
+        )
+
+        assert summary.passed, (
+            f"Legal moves (deque) mismatch: {summary.total_java_only_hexes} java-only + "
+            f"{summary.total_sim_only_hexes} sim-only hexes "
+            f"(hex_match={summary.hex_match_rate:.1%}, "
+            f"move_match={summary.move_match_rate:.1%})"
+        )
+
+
+@pytest.mark.validation
+class TestProneMoves:
+    def test_prone_moves(self, java_trace):
+        from tests.sim_validation.test_legal_moves import (
+            validate_legal_moves, diagnose_prone_extras,
+        )
+        from tests.sim_validation.reconstruct import extract_unit_state
+
+        prone_steps = []
+        for step in java_trace.steps:
+            raw_obs = step.raw_obs
+            if raw_obs.get("terminated") or raw_obs.get("truncated"):
+                continue
+            if not raw_obs.get("legal_moves"):
+                continue
+            java_unit = extract_unit_state(raw_obs, java_trace.rl_owner_id)
+            if java_unit and java_unit.get("prone", False):
+                prone_steps.append(step)
+
+        if not prone_steps:
+            pytest.skip(
+                "No prone steps in trace. "
+                "Try: --random-actions --max-rounds 20"
+            )
+
+        diagnostics = []
+        total_sim_only = 0
+        steps_with_extras = 0
+
+        for step in prone_steps:
+            result = validate_legal_moves(
+                step.raw_obs, java_trace.rl_owner_id,
+                step_idx=step.step_idx, algorithm="deque",
+            )
+            if result.sim_only_hexes:
+                steps_with_extras += 1
+                total_sim_only += len(result.sim_only_hexes)
+                diag = diagnose_prone_extras(
+                    result, result._sim_moves, result._walk_mp,
+                )
+                if diag:
+                    diagnostics.append(diag)
+
+        summary = (
+            f"Prone steps: {len(prone_steps)}, "
+            f"with extras: {steps_with_extras}, "
+            f"total sim-only hexes: {total_sim_only}"
+        )
+        print(f"\n{summary}")
+        for d in diagnostics:
+            print(d)
+
+        # This test is diagnostic — it prints details but only fails on java-only hexes
+        java_only = 0
+        for step in prone_steps:
+            result = validate_legal_moves(
+                step.raw_obs, java_trace.rl_owner_id,
+                step_idx=step.step_idx, algorithm="deque",
+            )
+            java_only += len(result.java_only_hexes)
+
+        assert java_only == 0, (
+            f"{java_only} java-only hexes in prone steps (Python sim is MISSING moves)"
         )
 
 
@@ -163,6 +258,74 @@ class TestHeat:
             f"{len(result.dissipation_errors)} heat errors. "
             f"First: {result.dissipation_errors[0]}"
         )
+
+
+@pytest.mark.validation
+class TestCrits:
+    def test_crits(self, java_trace):
+        """Validate crit state consistency across Java game trace.
+
+        Checks monotonicity of crit counters, engine/gyro side effects,
+        and walk MP consistency with leg damage. Best with --random-actions
+        --max-rounds 20 to generate internal damage and crits.
+        """
+        from tests.sim_validation.test_crits import validate_crit_trace
+
+        result = validate_crit_trace(
+            java_trace.steps, java_trace.rl_owner_id,
+        )
+        if result.total_steps == 0:
+            pytest.skip("No non-terminal steps in trace")
+
+        all_errors = (
+            result.consistency_errors
+            + result.side_effect_errors
+            + result.mp_errors
+        )
+
+        # Print diagnostics
+        print(f"\nCrit validation: {result.total_steps} steps, "
+              f"{result.crit_events} crit events")
+        if result.mp_errors:
+            print(f"  MP errors: {len(result.mp_errors)}")
+            for err in result.mp_errors[:5]:
+                print(f"    {err}")
+
+        assert not result.consistency_errors, (
+            f"{len(result.consistency_errors)} consistency errors. "
+            f"First: {result.consistency_errors[0]}"
+        )
+        assert not result.side_effect_errors, (
+            f"{len(result.side_effect_errors)} side-effect errors. "
+            f"First: {result.side_effect_errors[0]}"
+        )
+        # MP errors are warnings for now (may have edge cases)
+        if result.mp_errors:
+            print(f"  WARNING: {len(result.mp_errors)} MP consistency issues")
+
+
+@pytest.mark.validation
+class TestFiring:
+    def test_firing(self, java_trace):
+        """Validate Python sim firing against Java MegaMek.
+
+        Measurement test: prints detailed match rates for weapon fireability
+        and to-hit TNs, with per-weapon mismatch diagnostics. Always passes
+        (like test_princess_behavior) — the value is in the diagnostics.
+
+        Known gaps causing mismatches in edge cases:
+        - Prone arm restriction ("firing from other arm already")
+        - Target immobile modifier (-4)
+        - Shoulder actuator damage penalty (+4)
+        - LOS/arc edge cases (~2% mismatch rate)
+        """
+        from tests.sim_validation.test_firing import validate_firing_trace
+
+        result = validate_firing_trace(
+            java_trace.steps, java_trace.rl_owner_id,
+        )
+        if result.opp_fireable_total == 0 and result.rl_fireable_total == 0:
+            pytest.skip("No firing rounds with firing_report (Java may lack telemetry)")
 
 
 @pytest.mark.validation

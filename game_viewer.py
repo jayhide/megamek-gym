@@ -603,6 +603,40 @@ show(0);
 </html>"""
 
 
+def _json_default(obj):
+    """Handle numpy types and tuples for JSON serialization."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, tuple):
+        return list(obj)
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def _save_sim_log(save_path, game, step_log, outcome, game_rounds, elapsed, args):
+    """Write sim game data to a JSON file for post-game review."""
+    rl = game.rl_unit
+    opp = game.opp_unit
+    data = {
+        "metadata": {
+            "rl_unit": f"{rl.template.chassis} {rl.template.model}",
+            "opponent_unit": f"{opp.template.chassis} {opp.template.model}",
+            "outcome": outcome,
+            "game_rounds": game_rounds,
+            "elapsed_seconds": round(elapsed, 2),
+            "config": args.config,
+            "seed": args.seed,
+        },
+        "round_log": game.round_log,
+        "step_log": step_log,
+    }
+    with open(save_path, "w") as f:
+        json.dump(data, f, indent=2, default=_json_default)
+
+
 def main():
     args = parse_args()
 
@@ -687,6 +721,13 @@ def main():
         n_saves = collect_saves(args.megamek_dir, port, save_dir)
         print(f"Collected {n_saves} save files -> {save_dir}/")
 
+    # Save game log (sim mode)
+    if args.sim:
+        game = env.unwrapped._game
+        save_path = Path(args.output).with_suffix(".json")
+        _save_sim_log(save_path, game, step_log, outcome, game_rounds, elapsed, args)
+        print(f"Saved game log to {save_path}")
+
     env.close()
 
     if not snapshots:
@@ -696,7 +737,6 @@ def main():
     # Build transcript data
     if args.sim:
         from transcript import build_sim_transcript
-        game = env.unwrapped._game
         rl_label = f"{game.rl_unit.template.chassis} {game.rl_unit.template.model}"
         opp_label = f"{game.opp_unit.template.chassis} {game.opp_unit.template.model}"
         round_data = build_sim_transcript(game.round_log, step_log, rl_label, opp_label)

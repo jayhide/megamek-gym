@@ -119,6 +119,23 @@ class TestFlattenObservation:
         assert flat[offset] == pytest.approx(5 / 16)
         assert flat[offset + 1] == pytest.approx(7 / 17)
 
+    def test_unit_position_roundtrip(self):
+        """Verify unit coords can be round-tripped through flatten → denormalize."""
+        from megamek_gym.observation import _board_block_size
+        bw, bh = 16, 17
+        for ux, uy in [(8, 2), (0, 0), (15, 16), (8, 14)]:
+            obs = _make_obs()
+            obs["units"][0]["x"] = ux
+            obs["units"][0]["y"] = uy
+            flat = flatten_observation(obs, rl_owner_id=0)
+
+            offset = _board_block_size(bw, bh)
+            actual_x = round(flat[offset] * bw)
+            actual_y = round(flat[offset + 1] * bh)
+            assert (actual_x, actual_y) == (ux, uy), (
+                f"Round-trip failed: encoded ({ux},{uy}), got ({actual_x},{actual_y})"
+            )
+
     def test_facing_one_hot(self):
         obs = _make_obs()
         flat = flatten_observation(obs, rl_owner_id=0)

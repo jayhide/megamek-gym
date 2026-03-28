@@ -34,6 +34,7 @@ ALL_TESTS = [
     ("to_hit_components", 1, "To-hit modifier tables"),
     ("damage", 2, "Damage consistency (armor deltas)"),
     ("heat", 2, "Heat consistency"),
+    ("princess_behavior", 2, "Princess AI move selection comparison"),
     ("statistical", 3, "Statistical distribution comparison"),
 ]
 
@@ -161,7 +162,8 @@ def test_legal_moves(trace, verbose: bool) -> bool:
     """Tier 1: Legal move enumeration comparison."""
     from tests.sim_validation.test_legal_moves import validate_legal_moves_trace
 
-    summary = validate_legal_moves_trace(trace.steps, trace.rl_owner_id)
+    summary = validate_legal_moves_trace(trace.steps, trace.rl_owner_id,
+                                         algorithm="deque")
 
     _print_info(f"Checked {len(summary.per_step)} steps")
     _print_info(f"Java total moves: {summary.total_java_moves}")
@@ -302,6 +304,56 @@ def test_heat(trace, verbose: bool) -> bool:
     return True
 
 
+def test_princess_behavior(trace, verbose: bool) -> bool:
+    """Tier 2: Princess AI move selection comparison."""
+    from tests.sim_validation.test_princess_behavior import validate_princess_behavior
+
+    summary = validate_princess_behavior(trace)
+
+    _print_info(f"Total rounds: {summary.total_rounds}")
+    _print_info(f"Compared rounds: {summary.compared_rounds}")
+    if summary.skip_reasons:
+        skip_detail = ", ".join(f"{k}={v}" for k, v in summary.skip_reasons.items())
+        _print_info(f"Skipped: {summary.skipped_rounds} ({skip_detail})")
+    _print_info(f"Hex match rate: {summary.hex_match_rate:.1%}")
+    _print_info(f"Full match rate (hex+facing): {summary.full_match_rate:.1%}")
+    _print_info(f"Mean disagree distance: {summary.mean_disagree_distance:.1f} hexes")
+    _print_info(
+        f"Java dest reachable: {summary.java_dest_reachable_count}/{summary.compared_rounds}"
+    )
+
+    # Score comparison
+    if summary.python_scores_of_java:
+        avg_java = sum(summary.python_scores_of_java) / len(summary.python_scores_of_java)
+        avg_python = sum(summary.python_scores_of_python) / len(summary.python_scores_of_python)
+        _print_info(f"Avg Python score of Java's choice: {avg_java:.2f}")
+        _print_info(f"Avg Python score of Python's choice: {avg_python:.2f}")
+
+    # Directional bias
+    _print_info(
+        f"Directional bias: Java closer {summary.java_closer_count}, "
+        f"Python closer {summary.python_closer_count}, "
+        f"same {summary.same_distance_count}"
+    )
+
+    if verbose:
+        for comp in summary.comparisons:
+            if comp.skipped:
+                _print_info(f"  Round {comp.round_num}: SKIPPED ({comp.skip_reason})")
+                continue
+            match = "MATCH" if comp.hex_match else "DIFF"
+            _print_info(
+                f"  Round {comp.round_num}: [{match}] "
+                f"Java=({comp.java_dest[0]},{comp.java_dest[1]},f={comp.java_dest[2]}) "
+                f"Python=({comp.python_dest[0]},{comp.python_dest[1]},f={comp.python_dest[2]}) "
+                f"moves={comp.n_python_moves} reachable={comp.java_dest_reachable}"
+            )
+
+    # Measurement test — always passes
+    _print_pass("princess_behavior", f"Hex match {summary.hex_match_rate:.0%} (baseline)")
+    return True
+
+
 def test_statistical(args, verbose: bool) -> bool:
     """Tier 3: Statistical distribution comparison."""
     from tests.sim_validation.test_statistical import (
@@ -420,6 +472,7 @@ def main():
         "to_hit_components": lambda: test_to_hit_components(trace, args.verbose),
         "damage": lambda: test_damage(trace, args.verbose),
         "heat": lambda: test_heat(trace, args.verbose),
+        "princess_behavior": lambda: test_princess_behavior(trace, args.verbose),
         "statistical": lambda: test_statistical(args, args.verbose),
     }
 

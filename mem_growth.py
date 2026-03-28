@@ -60,6 +60,9 @@ def run_growth_benchmark(
     port: int,
     max_game_rounds: int,
     verbose: bool,
+    firing_strategy: str = "naive",
+    force_gc: bool = True,
+    mem_log: int = 1,
 ) -> list[dict]:
     """Run num_games on a single JVM, collecting per-game metrics.
 
@@ -73,10 +76,10 @@ def run_growth_benchmark(
         megamek_dir=megamek_dir_abs,
         rl_port=port,
         max_game_rounds=max_game_rounds,
-        firing_strategy="naive",
+        firing_strategy=firing_strategy,
         max_rotating_round_saves=0,
-        force_gc=True,
-        mem_log=1,
+        force_gc=force_gc,
+        mem_log=mem_log,
     )
 
     env = MegaMekEnv(config=config)
@@ -196,20 +199,35 @@ def main():
     parser.add_argument("--max-game-rounds", type=int, default=10,
                         help="Max rounds per game before truncation (default: 10)")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--firing-strategy", default="naive",
+                        choices=["naive", "princess"],
+                        help="Firing strategy (default: naive)")
+    parser.add_argument("--force-gc", action="store_true", default=True,
+                        help="Force GC between games (default: on)")
+    parser.add_argument("--no-force-gc", action="store_false", dest="force_gc",
+                        help="Disable forced GC between games")
+    parser.add_argument("--mem-log-level", type=int, default=1,
+                        choices=[1, 2, 3],
+                        help="Memory log level: 1=basic, 2=pools, 3=histogram")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, lambda *_: (print("\nInterrupted."), sys.exit(1)))
 
+    gc_label = "on" if args.force_gc else "off"
     print("=" * 72)
     print("  MegaMek Memory Growth Tracker")
     print("=" * 72)
     print(f"Games: {args.num_games} | Max rounds: {args.max_game_rounds} | "
-          f"Force GC: on | Mem log: 1")
+          f"Firing: {args.firing_strategy} | Force GC: {gc_label} | "
+          f"Mem log: {args.mem_log_level}")
 
     results = run_growth_benchmark(
         args.megamek_dir, args.num_games, args.port,
         max_game_rounds=args.max_game_rounds,
         verbose=args.verbose,
+        firing_strategy=args.firing_strategy,
+        force_gc=args.force_gc,
+        mem_log=args.mem_log_level,
     )
     print_timeseries(results, f"Memory Growth: {args.num_games} games")
 

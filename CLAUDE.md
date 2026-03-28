@@ -37,7 +37,7 @@ poetry run pytest -m validation --megamek-dir ../megamek --random-actions  # bet
 **Markers:**
 - *(no marker)* — unit tests: config, observation, reward, early termination, heat MP. No JVM needed.
 - `integration` — smoke tests: basic episode, truncation, termination, persistent reset, cross-validation, auto-wake, fixed deployment, board consistency, pilot stats, hierarchical actions, feature distributions. Each launches its own JVM.
-- `validation` — sim cross-validation: board, unit template, LOS, legal moves, distances, to-hit, damage, heat, statistical. Shares a single Java game trace (session-scoped fixture).
+- `validation` — sim cross-validation: board, unit template, LOS, legal moves, distances, to-hit, firing (weapon fireability + TNs), damage, heat, crits (monotonicity + side effects + MP consistency), statistical. Shares a single Java game trace (session-scoped fixture).
 
 The standalone scripts `smoke_test_all.py` and `validate_sim.py` are kept for manual debugging but the pytest wrappers (`tests/test_smoke.py`, `tests/test_sim_validation.py`) are the canonical way to run these tests.
 
@@ -91,7 +91,7 @@ Launches `RLGameRunner.main()` with pipe-delimited arguments. All args are optio
 
 Newline-delimited JSON over TCP (default port 9999):
 
-- **Java → Python** (observation): `{"type": "observation", "round": N, "phase": "MOVEMENT", "board": {...}, "units": [...], "legal_moves": [...], "reward": 0.0, "terminated": false, "truncated": false, "prev_round_enemy_x": X, "prev_round_enemy_y": Y, "prev_round_enemy_facing": F}` — `prev_round_enemy_*` fields contain the enemy's position/facing after the previous round's movement phase (captured at the start of firing), used by Python reward functions. Values are -1 when unavailable (e.g., round 1).
+- **Java → Python** (observation): `{"type": "observation", "round": N, "phase": "MOVEMENT", "board": {...}, "units": [...], "legal_moves": [...], "reward": 0.0, "terminated": false, "truncated": false, "prev_round_enemy_x": X, "prev_round_enemy_y": Y, "prev_round_enemy_facing": F, "firing_report": {...}}` — `prev_round_enemy_*` fields contain the enemy's position/facing after the previous round's movement phase (captured at the start of firing), used by Python reward functions. Values are -1 when unavailable (e.g., round 1). `firing_report` contains per-weapon fireability and to-hit TNs for both entities at the previous round's firing phase start (post-movement, pre-firing). Absent in the first observation. Contains: `rl_entity`/`opp_entity` (position, facing, delta_distance, mp_used, moved, heat) and `rl_weapons`/`opp_weapons` (per-weapon: weapon_name, weapon_index, location, destroyed, can_fire, to_hit_value, to_hit_desc, impossible).
 - **Python → Java** (action): `{"type": "action", "move_index": N}`
 - Terminal observations have empty board/units/legal_moves with `terminated: true` and `game_outcome: "WIN"|"LOSS"|"DRAW"`
 
@@ -105,6 +105,7 @@ megamek_gym/
 ├── env.py               # MegaMekEnv — full Gymnasium.Env implementation
 ├── java_process.py      # JavaProcess — subprocess wrapper for Gradle launcher
 ├── observation.py       # Flattens variable JSON observations → fixed float array
+├── pytest_plugin.py     # pytest11 entry point: registers --megamek-dir, --port CLI options
 └── reward.py            # RewardFunction base class + DamageDelta, LocationDestruction, WinLoss, Composite
 
 configs/
@@ -130,7 +131,7 @@ bench_sim.py             # Profile sim latency (per-phase breakdown) and memory 
 validate_sim.py          # Cross-validate Python sim against Java MegaMek (tiered tests)
 
 tests/
-├── conftest.py               # Shared fixtures: --megamek-dir, --port, java_trace
+├── conftest.py               # Shared fixtures: megamek_dir, base_port, java_trace
 ├── test_config.py            # Config parsing, validation, and YAML roundtrip tests
 ├── test_cross_validation.py  # Python-vs-Java cross-validation (hex distance, firing arcs)
 ├── test_observation.py       # Observation flattening correctness tests
@@ -145,7 +146,10 @@ tests/
     ├── test_los.py           # LOS comparison
     ├── test_legal_moves.py   # Legal move set comparison (highest priority)
     ├── test_to_hit.py        # To-hit modifier tables + distance cross-validation
+    ├── test_firing.py        # Weapon fireability + to-hit TN cross-validation
+    ├── test_princess_behavior.py  # Princess movement selection comparison
     ├── test_damage.py        # Damage consistency via armor deltas
+    ├── test_crits.py         # Crit state consistency (monotonicity, side effects, MP)
     ├── test_heat.py          # Heat consistency
     └── test_statistical.py   # Game distribution comparison
 ```

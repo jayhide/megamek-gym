@@ -1,42 +1,12 @@
-"""Shared pytest configuration for megamek-gym tests.
+"""Shared pytest fixtures for megamek-gym tests.
 
-Adds --megamek-dir and --port CLI options for integration/validation tests,
-and provides session-scoped fixtures for Java game traces.
+CLI options (--megamek-dir, --port, etc.) are registered via the
+pytest11 entry point in megamek_gym/pytest_plugin.py.
 """
 
 from __future__ import annotations
 
 import pytest
-
-
-# ---------------------------------------------------------------------------
-# CLI options
-# ---------------------------------------------------------------------------
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--megamek-dir",
-        default="../megamek",
-        help="Path to MegaMek checkout (for integration/validation tests)",
-    )
-    parser.addoption(
-        "--port",
-        default=9999,
-        type=int,
-        help="Base TCP port for Java bridge (for integration/validation tests)",
-    )
-    parser.addoption(
-        "--max-rounds",
-        default=10,
-        type=int,
-        help="Max game rounds for Java trace collection (validation tests)",
-    )
-    parser.addoption(
-        "--random-actions",
-        action="store_true",
-        default=False,
-        help="Use random actions in Java trace (better for damage/heat validation)",
-    )
 
 
 # ---------------------------------------------------------------------------

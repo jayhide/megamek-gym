@@ -28,6 +28,7 @@ def _set_pdeathsig():
 
 # JVM options matching rlJvmOptions in megamek/build.gradle
 _JVM_OPTIONS = [
+    "-Drl.debug.moves=true",
     "-Xmx512m",
     "--add-opens", "java.base/java.util=ALL-UNNAMED",
     "--add-opens", "java.base/java.util.concurrent=ALL-UNNAMED",

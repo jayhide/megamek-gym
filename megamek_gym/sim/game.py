@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 
+from megamek_gym.reward import hex_bearing
 from megamek_gym.sim.board import BOARD, Board
 from megamek_gym.sim.firing import d6, resolve_firing
 from megamek_gym.sim.heat import apply_heat, check_overheat, dissipate_heat
@@ -24,10 +25,12 @@ class Game:
         opp_start: tuple[int, int] = (1, 15),
         max_rounds: int = 40,
         rng: random.Random | None = None,
+        move_algorithm: str = "bfs",
     ) -> None:
         self.board: Board = BOARD
         self.max_rounds = max_rounds
         self.rng = rng or random.Random()
+        self.move_algorithm = move_algorithm
 
         # LOS table (computed once, reused across resets)
         self._los_table: LosTable | None = None
@@ -53,6 +56,9 @@ class Game:
         self.prev_round_enemy_x: int = -1
         self.prev_round_enemy_y: int = -1
         self.prev_round_enemy_facing: int = -1
+
+        # Princess herding: friendsCoords is None in round 1 (Java behavior)
+        self._opp_friends_coords: tuple[int, int] | None = None
 
         # Board observation data (cached, never changes)
         self._board_hexes: list[dict] | None = None
@@ -85,9 +91,11 @@ class Game:
         self.rl_unit.reset_state()
         self.opp_unit.reset_state()
 
-        # Deploy units
-        self.rl_unit.deploy(self._rl_start[0], self._rl_start[1], 3)
-        self.opp_unit.deploy(self._opp_start[0], self._opp_start[1], 0)
+        # Deploy units facing each other (matching Java's Coords.direction())
+        rl_facing = round(hex_bearing(*self._rl_start, *self._opp_start) / 60) % 6
+        opp_facing = round(hex_bearing(*self._opp_start, *self._rl_start) / 60) % 6
+        self.rl_unit.deploy(self._rl_start[0], self._rl_start[1], rl_facing)
+        self.opp_unit.deploy(self._opp_start[0], self._opp_start[1], opp_facing)
 
         self.round = 1
         self.terminated = False
@@ -95,6 +103,7 @@ class Game:
         self.game_outcome = None
         self.prev_round_enemy_x = -1
         self.prev_round_enemy_y = -1
+        self._opp_friends_coords = None
         self.prev_round_enemy_facing = -1
 
         self.round_log = []
@@ -121,7 +130,8 @@ class Game:
             action = max(0, min(action, len(rl_moves) - 1))
 
         # Enumerate opponent moves
-        opp_moves = enumerate_moves(self.opp_unit, self.board, self.rl_unit)
+        opp_moves = enumerate_moves(self.opp_unit, self.board, self.rl_unit,
+                                    algorithm=self.move_algorithm)
 
         # Move order based on initiative — capture movement info
         if self.rl_moves_first:
@@ -240,10 +250,26 @@ class Game:
     def _select_opponent_move(self, moves: list[dict]) -> int:
         if not moves:
             return 0
-        return select_move(
+        # If RL moved first, the enemy (RL) has already moved from Princess's POV
+        enemy_has_moved = self.rl_moves_first
+
+        # Pre-compute enemy reachable hexes for unmoved enemy evaluation
+        enemy_reachable = None
+        if not enemy_has_moved:
+            rl_moves = enumerate_moves(self.rl_unit, self.board, self.opp_unit,
+                                       algorithm=self.move_algorithm)
+            enemy_reachable = {(m["dest_x"], m["dest_y"]) for m in rl_moves}
+
+        result = select_move(
             moves, self.opp_unit.to_obs_dict(), self.rl_unit.to_obs_dict(),
             self.board, self.board_hexes, self.los_table,
+            enemy_has_moved=enemy_has_moved,
+            friends_coords=self._opp_friends_coords,
+            enemy_reachable_hexes=enemy_reachable,
         )
+        # Update friends_coords for next round (Java sets this after each move)
+        self._opp_friends_coords = (self.opp_unit.x, self.opp_unit.y)
+        return result
 
     def _resolve_firing(self) -> tuple[dict, dict]:
         if self.rl_unit.destroyed or self.opp_unit.destroyed:
@@ -292,11 +318,18 @@ class Game:
                 self.game_outcome = "LOSS"
                 return True
 
+        if self.opp_unit.prone:
+            if self.opp_unit.loc_destroyed[6] or self.opp_unit.loc_destroyed[7]:
+                self.terminated = True
+                self.game_outcome = "WIN"
+                return True
+
         return False
 
     def _build_observation(self) -> dict:
         """Build observation dict and cache legal moves."""
-        rl_moves = enumerate_moves(self.rl_unit, self.board, self.opp_unit)
+        rl_moves = enumerate_moves(self.rl_unit, self.board, self.opp_unit,
+                                   algorithm=self.move_algorithm)
 
         # Add LOS info to moves
         ex, ey = self.opp_unit.x, self.opp_unit.y

@@ -1043,7 +1043,7 @@ _SIM_MOVE_TYPE_MAP = {
 }
 
 
-def _sim_unit_status(obs_dict: dict) -> dict:
+def _sim_unit_status(obs_dict: dict, bot_tag: str = "") -> dict:
     """Convert a sim unit's to_obs_dict() output to armor_summary_structured format."""
     armor_locs = obs_dict.get("armor", [])
     total_armor = 0
@@ -1080,6 +1080,8 @@ def _sim_unit_status(obs_dict: dict) -> dict:
 
     pct = (total_armor / total_armor_max * 100) if total_armor_max > 0 else 0
     name = f"{obs_dict.get('chassis', '?')} {obs_dict.get('model', '?')}"
+    if bot_tag:
+        name = f"{name} ({bot_tag})"
 
     return {
         "name": name,
@@ -1095,7 +1097,7 @@ def _sim_unit_status(obs_dict: dict) -> dict:
     }
 
 
-def _sim_movement(move_info: dict | None) -> dict | None:
+def _sim_movement(move_info: dict | None, bot_tag: str = "") -> dict | None:
     """Convert a game.py movement event to transcript movement dict."""
     if move_info is None:
         return None
@@ -1109,8 +1111,12 @@ def _sim_movement(move_info: dict | None) -> dict | None:
     elif not move_info["prone"] and move_info["was_prone"]:
         prone_change = "stood"
 
+    name = move_info["name"]
+    if bot_tag:
+        name = f"{name} ({bot_tag})"
+
     return {
-        "name": move_info["name"],
+        "name": name,
         "from_pos": list(move_info["from_pos"]),
         "to_pos": list(move_info["to_pos"]),
         "facing": facing_str,
@@ -1183,8 +1189,9 @@ def build_sim_transcript(round_log: list[dict], step_log: list[dict],
         starting_status = []
         # Use unit_states from the first round (post-round), but for starting
         # state we want pre-combat, so just show full health labels
-        for u in first["unit_states"]:
-            starting_status.append(_sim_unit_status(u))
+        bot_tags = ["RLBot", "Princess"]
+        for i, u in enumerate(first["unit_states"]):
+            starting_status.append(_sim_unit_status(u, bot_tags[i] if i < len(bot_tags) else ""))
 
         init = first["initiative"]
         rl_name = f"{rl_label} (RLBot)"
@@ -1220,8 +1227,8 @@ def build_sim_transcript(round_log: list[dict], step_log: list[dict],
             "first_mover_id": 0 if entry["rl_moves_first"] else 1,
         }
 
-        rl_move = _sim_movement(entry["rl_movement"])
-        opp_move = _sim_movement(entry["opp_movement"])
+        rl_move = _sim_movement(entry["rl_movement"], "RLBot")
+        opp_move = _sim_movement(entry["opp_movement"], "Princess")
 
         if entry["rl_moves_first"]:
             first_movement = [rl_move] if rl_move else []
@@ -1243,7 +1250,9 @@ def build_sim_transcript(round_log: list[dict], step_log: list[dict],
         )
 
         # Unit status after this round
-        unit_status = [_sim_unit_status(u) for u in entry["unit_states"]]
+        bot_tags = ["RLBot", "Princess"]
+        unit_status = [_sim_unit_status(u, bot_tags[i] if i < len(bot_tags) else "")
+                       for i, u in enumerate(entry["unit_states"])]
 
         # RL steps: step_log tags with resulting obs round (game_round + 1)
         rl_steps = _build_rl_steps(steps_by_round.get(game_round + 1, []))

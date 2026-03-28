@@ -488,7 +488,8 @@ def print_raw(tags, metric):
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="TensorBoard training run summarizer")
-    parser.add_argument("run_dirs", nargs="+", help="Run directories (or glob patterns)")
+    parser.add_argument("run_dirs", nargs="*", help="Run directories (or glob patterns)")
+    parser.add_argument("--last", action="store_true", help="Use the most recently modified run in runs/")
     parser.add_argument("--windows", "-w", type=int, default=10, help="Number of summary windows (default 10)")
     parser.add_argument("--tail", "-t", type=float, default=100, help="Only analyze last N%% of training (default 100)")
     parser.add_argument("--diagnostics-only", "-d", action="store_true", help="Only show diagnostics")
@@ -496,6 +497,21 @@ def main():
     parser.add_argument("--raw", "-r", help="Dump raw values for a specific metric")
     parser.add_argument("--list-metrics", "-l", action="store_true", help="List available metrics and exit")
     args = parser.parse_args()
+
+    if args.last:
+        runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
+        if not os.path.isdir(runs_dir):
+            print("ERROR: runs/ directory not found", file=sys.stderr)
+            sys.exit(1)
+        subdirs = [os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
+                    if os.path.isdir(os.path.join(runs_dir, d))]
+        if not subdirs:
+            print("ERROR: no run directories found in runs/", file=sys.stderr)
+            sys.exit(1)
+        args.run_dirs = [max(subdirs, key=os.path.getmtime)]
+        print(f"Using latest run: {os.path.basename(args.run_dirs[0])}", file=sys.stderr)
+    elif not args.run_dirs:
+        parser.error("either provide run directories or use --last")
 
     # Expand glob patterns in run_dirs
     expanded = []

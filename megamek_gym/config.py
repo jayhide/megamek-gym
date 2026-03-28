@@ -54,7 +54,7 @@ class MegaMekConfig:
     validate_caches: bool = False
     # Training hyperparameters (used by train_ppo.py)
     exp_name: str = "megamek-ppo"
-    seed: int = 1
+    seed: int | None = None
     cuda: bool = True
     num_envs: int = 8
     stagger_delay: float = 3.0
