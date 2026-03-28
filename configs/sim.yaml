@@ -1,0 +1,9 @@
+backend: sim
+action_space_type: hierarchical
+rl_unit: Trebuchet TBT-5S
+opponent_unit: Trebuchet TBT-5S
+board: Map Set 6/16x17 Woodland
+rl_fixed_coords: [8, 1]
+opponent_fixed_coords: [8, 16]
+max_game_rounds: 40
+max_destinations: 125

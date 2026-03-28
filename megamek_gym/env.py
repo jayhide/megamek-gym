@@ -474,6 +474,7 @@ class MegaMekEnv(gymnasium.Env):
             "round": game_round,
             "phase": raw_obs.get("phase", ""),
             "n_legal_moves": n_legal,
+            "n_destinations": len(self._destinations) if self._hierarchical else 0,
             "moves_truncated": moves_truncated,
             "game_outcome": game_outcome,
             "game_rounds": game_round,

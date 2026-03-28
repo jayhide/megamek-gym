@@ -149,7 +149,7 @@ class HierarchicalAgent(nn.Module):
         entropy = dest_dist.entropy() + facing_dist.entropy()
 
         combined_action = torch.stack([dest_action, facing_action], dim=-1)
-        value = self.critic(obs)
+        value = self.get_value(obs)
 
         return combined_action, log_prob, entropy, value
 

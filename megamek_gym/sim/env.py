@@ -9,6 +9,7 @@ from __future__ import annotations
 import gymnasium
 import numpy as np
 
+from megamek_gym.config import MegaMekConfig
 from megamek_gym.observation import (
     UNIT_FEATURES,
     GLOBAL_FEATURES,
@@ -34,6 +35,9 @@ class MegaMekSimEnv(gymnasium.Env):
 
     def __init__(
         self,
+        config: MegaMekConfig | None = None,
+        *,
+        # Backwards-compatible kwargs for direct usage (tests, bench_sim)
         rl_unit: str = "Trebuchet TBT-5S",
         opponent_unit: str = "Trebuchet TBT-5S",
         rl_fixed_coords: tuple[int, int] = (14, 1),
@@ -46,29 +50,45 @@ class MegaMekSimEnv(gymnasium.Env):
     ) -> None:
         super().__init__()
 
-        self.max_destinations = max_destinations
-        self.board_width = board_width
-        self.board_height = board_height
+        if config is not None:
+            # Config-based construction (from train_ppo.py)
+            self.config = config
+            self.max_destinations = config.max_destinations
+            self.board_width = config.resolved_board_width
+            self.board_height = config.resolved_board_height
+
+            self._game = Game(
+                rl_unit_name=config.rl_unit,
+                opponent_unit_name=config.opponent_unit,
+                rl_start=config.rl_fixed_coords or (14, 1),
+                opp_start=config.opponent_fixed_coords or (1, 15),
+                max_rounds=config.max_game_rounds,
+            )
+        else:
+            # Backwards-compatible kwargs construction
+            self.config = None
+            self.max_destinations = max_destinations
+            self.board_width = board_width
+            self.board_height = board_height
+
+            self._game = Game(
+                rl_unit_name=rl_unit,
+                opponent_unit_name=opponent_unit,
+                rl_start=rl_fixed_coords,
+                opp_start=opponent_fixed_coords,
+                max_rounds=max_game_rounds,
+            )
 
         # Observation and action spaces (matching Java bridge env)
         obs_size = compute_obs_size_hierarchical(
-            board_width, board_height, max_destinations
+            self.board_width, self.board_height, self.max_destinations
         )
         self.observation_space = gymnasium.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
         # MultiDiscrete: [destination_index (0..max_dest-1), facing (0..5)]
         self.action_space = gymnasium.spaces.MultiDiscrete(
-            [max_destinations, 6]
-        )
-
-        # Game engine
-        self._game = Game(
-            rl_unit_name=rl_unit,
-            opponent_unit_name=opponent_unit,
-            rl_start=rl_fixed_coords,
-            opp_start=opponent_fixed_coords,
-            max_rounds=max_game_rounds,
+            [self.max_destinations, 6]
         )
 
         # Reward function
@@ -194,17 +214,32 @@ class MegaMekSimEnv(gymnasium.Env):
         return {"dest_mask": dest_mask, "facing_mask": facing_mask}
 
     def _build_info(self, obs_dict: dict) -> dict:
-        """Build info dict (vector-safe types only for AsyncVectorEnv)."""
-        info: dict = {
-            "n_legal_moves": self._n_legal_moves,
-            "round": obs_dict.get("round", 0),
-            "phase": obs_dict.get("phase", "MOVEMENT"),
-            "action_mask": self.action_masks(),
-        }
-        if obs_dict.get("terminated") or obs_dict.get("truncated"):
+        """Build info dict (vector-safe types only for AsyncVectorEnv).
+
+        Matches MegaMekEnv._build_info output shape so train_ppo.py works
+        with both backends.
+        """
+        terminated = obs_dict.get("terminated", False)
+        truncated = obs_dict.get("truncated", False)
+        game_round = obs_dict.get("round", 0)
+
+        game_outcome = 0
+        if terminated or truncated:
             outcome_str = obs_dict.get("game_outcome", "UNKNOWN")
-            info["game_outcome"] = {"WIN": 1, "LOSS": -1, "DRAW": 0}.get(
-                outcome_str, 0
-            )
-            info["game_rounds"] = obs_dict.get("round", 0)
-        return info
+            game_outcome = {"WIN": 1, "LOSS": -1, "DRAW": 0}.get(outcome_str, 0)
+
+        moves_truncated = max(0, len(self._destinations) - self.max_destinations)
+
+        return {
+            "action_mask": self.action_masks(),
+            "round": game_round,
+            "phase": obs_dict.get("phase", "MOVEMENT"),
+            "n_legal_moves": self._n_legal_moves,
+            "n_destinations": len(self._destinations),
+            "moves_truncated": moves_truncated,
+            "game_outcome": game_outcome,
+            "game_rounds": game_round,
+            "java_crash": 0,
+            "early_termination": 0,
+            "auto_wake_count": 0,
+        }

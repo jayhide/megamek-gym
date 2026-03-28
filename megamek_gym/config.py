@@ -21,6 +21,7 @@ def parse_board_dimensions(board_name: str) -> tuple[int, int] | None:
 class MegaMekConfig:
     """Configuration for a MegaMek RL environment instance."""
 
+    backend: str = "java"             # "java" or "sim"
     megamek_dir: str = "../megamek"
     rl_unit: str = "Commando COM-2D"
     opponent_unit: str = "Commando COM-2D"
@@ -83,6 +84,8 @@ class MegaMekConfig:
             self.rl_fixed_coords = tuple(self.rl_fixed_coords)
         if isinstance(self.opponent_fixed_coords, list):
             self.opponent_fixed_coords = tuple(self.opponent_fixed_coords)
+        if self.backend == "sim" and self.action_space_type != "hierarchical":
+            raise ValueError("backend='sim' requires action_space_type='hierarchical'")
         # Validate that board dimensions can be resolved
         _ = self.resolved_board_width
         _ = self.resolved_board_height
