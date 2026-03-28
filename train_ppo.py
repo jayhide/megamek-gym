@@ -34,12 +34,18 @@ def make_env(env_index, cfg):
     # since AsyncVectorEnv may change the working directory.
     megamek_dir = str(os.path.abspath(cfg.megamek_dir))
     stagger_delay = cfg.stagger_delay
+    backend = cfg.backend
     def thunk():
-        delay = env_index * stagger_delay
-        if delay > 0:
-            time.sleep(delay)
-        env_cfg = dataclasses.replace(cfg, env_index=env_index, megamek_dir=megamek_dir)
-        env = gym.make("MegaMekGym/MegaMek-v0", config=env_cfg)
+        if backend == "sim":
+            from megamek_gym.sim.env import MegaMekSimEnv
+            env_cfg = dataclasses.replace(cfg, env_index=env_index)
+            env = MegaMekSimEnv(config=env_cfg)
+        else:
+            delay = env_index * stagger_delay
+            if delay > 0:
+                time.sleep(delay)
+            env_cfg = dataclasses.replace(cfg, env_index=env_index, megamek_dir=megamek_dir)
+            env = gym.make("MegaMekGym/MegaMek-v0", config=env_cfg)
         env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
@@ -67,6 +73,7 @@ def parse_args():
     parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
 
     # All config-backed args: default=None so we detect CLI overrides
+    parser.add_argument("--backend", type=str, default=None, choices=["java", "sim"])
     parser.add_argument("--megamek-dir", type=str, default=None)
     parser.add_argument("--port-base", type=int, default=None)
     parser.add_argument("--exp-name", type=str, default=None)
@@ -141,7 +148,7 @@ if __name__ == "__main__":
     minibatch_size = batch_size // cfg.num_minibatches
 
     if cfg.seed is None:
-        cfg.seed = np.random.default_rng().integers(0, 2**31)
+        cfg.seed = int(np.random.default_rng().integers(0, 2**31))
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -166,8 +173,9 @@ if __name__ == "__main__":
 
     # Resolve classpath once in the main process before spawning workers.
     # Workers read from the cached file, avoiding concurrent Gradle races.
-    from megamek_gym.java_process import JavaProcess
-    JavaProcess.warmup_classpath(cfg.megamek_dir)
+    if cfg.backend != "sim":
+        from megamek_gym.java_process import JavaProcess
+        JavaProcess.warmup_classpath(cfg.megamek_dir)
 
     envs = gym.vector.AsyncVectorEnv(
       [make_env(i, cfg) for i in range(cfg.num_envs)],
@@ -271,7 +279,7 @@ if __name__ == "__main__":
 
         print(f"\n{'='*60}")
         print(f"  PPO Training — {cfg.exp_name}")
-        print(f"  Device: {device} | Envs: {cfg.num_envs} | Stagger: {cfg.stagger_delay}s")
+        print(f"  Backend: {cfg.backend} | Device: {device} | Envs: {cfg.num_envs} | Stagger: {cfg.stagger_delay}s")
         n_params = sum(p.numel() for p in agent.parameters())
         if hierarchical:
             print(f"  Obs: {obs_size} (critic: {critic_obs_size}) | Action: MultiDiscrete([{cfg.max_destinations}, 6]) | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
@@ -281,10 +289,13 @@ if __name__ == "__main__":
         print(f"  Batch: {batch_size} | Minibatch: {minibatch_size}")
         print(f"  LR: {cfg.learning_rate} | Ent: {cfg.ent_coef} | Gamma: {cfg.gamma}")
         print(f"  Config: runs/{run_name}/config.yaml")
-        print(f"  Java logs:")
-        for i in range(cfg.num_envs):
-            port = cfg.rl_port + i
-            print(f"    env {i}: {cfg.megamek_dir}/rl_java_{port}.log")
+        if cfg.backend == "sim":
+            print(f"  Backend: Python sim (no JVM)")
+        else:
+            print(f"  Java logs:")
+            for i in range(cfg.num_envs):
+                port = cfg.rl_port + i
+                print(f"    env {i}: {cfg.megamek_dir}/rl_java_{port}.log")
         print(f"{'='*60}\n")
 
         recent_returns = []
@@ -295,6 +306,7 @@ if __name__ == "__main__":
             total_moves_truncated_steps = 0  # steps where legal moves exceeded max_legal_moves
             total_moves_truncated_count = 0  # total number of moves dropped across all steps
         rollout_n_legal = []
+        rollout_n_dest = []
 
         for update in range(start_update, num_updates + 1):
 
@@ -348,6 +360,8 @@ if __name__ == "__main__":
                     next_done = torch.Tensor(done).to(device)
                     next_mask = torch.tensor(np.array(info["action_mask"])).to(device)
                 rollout_n_legal.extend(info["n_legal_moves"])
+                if hierarchical:
+                    rollout_n_dest.extend(info["n_destinations"])
 
                 # Track move truncation
                 trunc_counts = info.get("moves_truncated", np.zeros(cfg.num_envs))
@@ -444,6 +458,9 @@ if __name__ == "__main__":
             # Training
             b_inds = np.arange(batch_size)
             clipfracs = []
+            grad_norms = []
+            policy_grad_norms = []
+            value_grad_norms = []
             for epoch in range(cfg.update_epochs):
                 np.random.shuffle(b_inds)
                 for start in range(0, batch_size, minibatch_size):
@@ -494,7 +511,15 @@ if __name__ == "__main__":
 
                     optimizer.zero_grad()
                     loss.backward()
-                    nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
+
+                    # Per-network gradient norms (before clipping)
+                    policy_grads = [p.grad for n, p in agent.named_parameters() if p.grad is not None and not n.startswith("critic")]
+                    value_grads = [p.grad for n, p in agent.named_parameters() if p.grad is not None and n.startswith("critic")]
+                    policy_grad_norms.append(torch.norm(torch.stack([torch.norm(g) for g in policy_grads])).item())
+                    value_grad_norms.append(torch.norm(torch.stack([torch.norm(g) for g in value_grads])).item())
+
+                    grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
+                    grad_norms.append(grad_norm.item())
                     optimizer.step()
 
                 if cfg.target_kl is not None and approx_kl > cfg.target_kl:
@@ -513,6 +538,8 @@ if __name__ == "__main__":
             writer.add_scalar("charts/reward_std", rewards_buf.std().item(), global_step)
             writer.add_scalar("charts/value_mean", values_buf.mean().item(), global_step)
             writer.add_scalar("charts/value_std", values_buf.std().item(), global_step)
+            writer.add_scalar("charts/return_mean", b_returns.mean().item(), global_step)
+            writer.add_scalar("charts/return_std", b_returns.std().item(), global_step)
             writer.add_scalar("timing/rollout_seconds", rollout_s, global_step)
             writer.add_scalar("timing/train_seconds", train_s, global_step)
             writer.add_scalar("timing/episodes_per_rollout", episodes_this_rollout, global_step)
@@ -525,6 +552,10 @@ if __name__ == "__main__":
             writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
             writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
             writer.add_scalar("losses/explained_variance", explained_var, global_step)
+            mean_grad_norm = np.mean(grad_norms)
+            writer.add_scalar("debug/grad_norm_total", mean_grad_norm, global_step)
+            writer.add_scalar("debug/grad_norm_policy", np.mean(policy_grad_norms), global_step)
+            writer.add_scalar("debug/grad_norm_value", np.mean(value_grad_norms), global_step)
 
             legal_mean = int(np.mean(rollout_n_legal)) if rollout_n_legal else 0
             legal_max = int(np.max(rollout_n_legal)) if rollout_n_legal else 0
@@ -532,10 +563,17 @@ if __name__ == "__main__":
                 writer.add_scalar("charts/n_legal_moves_mean", np.mean(rollout_n_legal), global_step)
                 writer.add_scalar("charts/n_legal_moves_max", np.max(rollout_n_legal), global_step)
                 writer.add_scalar("charts/n_legal_moves_min", np.min(rollout_n_legal), global_step)
+            dest_mean = int(np.mean(rollout_n_dest)) if rollout_n_dest else 0
+            dest_max = int(np.max(rollout_n_dest)) if rollout_n_dest else 0
+            if rollout_n_dest:
+                writer.add_scalar("charts/n_destinations_mean", np.mean(rollout_n_dest), global_step)
+                writer.add_scalar("charts/n_destinations_max", np.max(rollout_n_dest), global_step)
+                writer.add_scalar("charts/n_destinations_min", np.min(rollout_n_dest), global_step)
             if total_moves_truncated_steps > 0:
                 writer.add_scalar("charts/moves_truncated_steps", total_moves_truncated_steps, global_step)
                 writer.add_scalar("charts/moves_truncated_count", total_moves_truncated_count, global_step)
             rollout_n_legal.clear()
+            rollout_n_dest.clear()
 
             elapsed = time.time() - start_time
             sps = int(session_steps / elapsed)
@@ -546,9 +584,10 @@ if __name__ == "__main__":
                 f"[update {update}/{num_updates} | {pct:.1f}% | ETA {fmt_time(eta_seconds)}]"
                 f" SPS={sps}"
                 f" | pg={pg_loss.item():.4f} vf={v_loss.item():.4f} ent={entropy_loss.item():.3f}"
-                f" | kl={approx_kl.item():.4f} clip={np.mean(clipfracs):.3f}"
+                f" | kl={approx_kl.item():.4f} clip={np.mean(clipfracs):.3f} gn={mean_grad_norm:.3f}"
                 f" | ev={explained_var:.4f}"
                 f" | legal={legal_mean}/{legal_max}"
+                f"{f' dest={dest_mean}/{dest_max}' if hierarchical else ''}"
                 f" | rollout={rollout_s:.1f}s train={train_s:.1f}s episodes={episodes_this_rollout}"
             )
 
@@ -631,7 +670,7 @@ if __name__ == "__main__":
         print(f"\n  Evaluate:")
         print(f"    poetry run python eval.py --checkpoint runs/{run_name}/checkpoints/latest.pt --num-episodes 10")
         print(f"\n  TensorBoard:")
-        print(f"    tensorboard --logdir runs/{run_name}")
+        print(f"    poetry run tensorboard --logdir runs/{run_name} --samples_per_plugin=scalars=99999")
         print(f"{'='*60}")
 
     finally:
