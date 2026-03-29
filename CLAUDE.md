@@ -16,13 +16,13 @@ Always use `poetry run python` instead of bare `python`.
 All tests are unified under pytest with markers. **Run after any non-trivial code change:**
 
 ```bash
-# Unit tests only (fast, no JVM) — default
+# Unit tests only (fast, no JVM) — default (~2 min)
 poetry run pytest
 
 # Integration smoke tests (require JVM, ~2-3 min)
 poetry run pytest -m integration --megamek-dir ../megamek
 
-# Sim-vs-Java cross-validation (require JVM)
+# Sim-vs-Java cross-validation (require JVM, ~5-7 min)
 poetry run pytest -m validation --megamek-dir ../megamek
 
 # Everything (unit + integration + validation)
@@ -32,14 +32,24 @@ poetry run pytest -m "" --megamek-dir ../megamek
 poetry run pytest -m integration --megamek-dir ../megamek -v          # verbose
 poetry run pytest -m integration --megamek-dir ../megamek --port 9999  # custom port
 poetry run pytest -m validation --megamek-dir ../megamek --random-actions  # better for damage/heat
+poetry run pytest -m validation --megamek-dir ../megamek --trace-workers 11  # max parallelism
 ```
+
+**Typical timing** (8-core machine):
+| Suite | Time | Notes |
+|-------|------|-------|
+| Unit tests (`poetry run pytest`) | ~2 min | No JVM. Slowest: `test_many_games_with_damage_falls` (20 sim games, parallelized via ProcessPoolExecutor) |
+| Validation (`-m validation`) | ~5-7 min | 11 JVM traces collected in parallel (default: all 11 concurrent, `--trace-workers` to tune). Trace collection ~15-33s depending on workers, then `test_statistical` ~45s (50 sim games, parallelized), `test_prone_validity` ~4 min |
+| Integration (`-m integration`) | ~2-3 min | Each test launches its own JVM |
 
 **Markers:**
 - *(no marker)* — unit tests: config, observation, reward, early termination, heat MP. No JVM needed.
 - `integration` — smoke tests: basic episode, truncation, termination, persistent reset, cross-validation, auto-wake, fixed deployment, board consistency, pilot stats, hierarchical actions, feature distributions. Each launches its own JVM.
-- `validation` — sim cross-validation: board, unit template, LOS, legal moves (walk patrol + run patrol with dual-bot scripted movement), distances, to-hit, firing (weapon fireability + TNs), damage, heat, crits (monotonicity + side effects + MP consistency), statistical. Legal moves tests use dual-bot mode (`opponentType=rl`, `firingStrategy=none`) with scripted waypoint paths so both units traverse diverse board positions. Other tests share a single Java game trace (session-scoped fixture).
+- `validation` — sim cross-validation: board, unit template, LOS, legal moves (walk patrol + run patrol with dual-bot scripted movement), prone moves (via `inject_state` — RL unit starts prone), distances, to-hit, per-move features (distance + weapon arcs cross-validated against Java's `java_dist_to_enemy` and `java_weapon_arcs[]`), observation features (127-dim base vector end-to-end validated against expected values from raw Java obs), firing (weapon fireability + TNs: measurement test on java_trace + asserting test on walk patrol trace), damage, heat, crits (monotonicity + side effects + MP consistency), statistical. Legal moves and firing walk patrol tests use dual-bot mode (`opponentType=rl`, `firingStrategy=none`) with scripted waypoint paths so both units traverse diverse board positions. Prone moves test uses `inject_state` to deterministically set the RL unit prone at game start (no stochastic falls needed). Injected-state tests use `inject_state` with `firingStrategy=naive` for deterministic testing: `damaged_patrol_trace` (low armor on both units → guaranteed damage/crits/location destructions), `heated_patrol_trace` (RL heat=15 → guaranteed heat dissipation and MP penalty cross-validation), `weapons_damaged_patrol_trace` (RL weapons 0,2 destroyed → verifies unfireable in firing_report), `shutdown_patrol_trace` (RL heat=35 + opponent all weapons destroyed → deterministic heat progression, validates shutdown transitions only at heat >= 14). Heat generation cross-validation uses firing_report weapon data to verify `curr_heat == max(0, prev_heat + weapon_heat + running_heat + engine_heat - sinks)` on heated and damaged traces. `gyro_destroyed_trace` (both units gyro_hits=2 + reduced limb armor → PSR auto-fails on any trigger, validates fall mechanics), `hip_damaged_trace` (RL right hip hit → validates MP halving ceil(5/2)=3). `collect_dual_game_trace()` accepts `firing_strategy` and `initial_state` parameters. The Java-side `applyDeferredInjection` calls `sendUpdateEntity(entity)` to push injected state to the server (without this, MegaMek's server state sync overwrites client-only modifications). Crit slot damage (`crit_state` field) requires persistent re-application before every observation build because it doesn't survive `sendUpdateEntity` server round-trips. Other tests share a single Java game trace (session-scoped fixture).
 
 The standalone scripts `smoke_test_all.py` and `validate_sim.py` are kept for manual debugging but the pytest wrappers (`tests/test_smoke.py`, `tests/test_sim_validation.py`) are the canonical way to run these tests.
+
+**Future work:** Ammo tracking cross-validation — Java sends `ammo[].shots_remaining` and `reconstruct.py` reads it (`extract_ammo_state()`), but no test verifies that the sim correctly tracks ammo consumption across rounds.
 
 ## Architecture
 
@@ -94,6 +104,7 @@ Newline-delimited JSON over TCP (default port 9999):
 
 - **Java → Python** (observation): `{"type": "observation", "round": N, "phase": "MOVEMENT", "board": {...}, "units": [...], "legal_moves": [...], "reward": 0.0, "terminated": false, "truncated": false, "prev_round_enemy_x": X, "prev_round_enemy_y": Y, "prev_round_enemy_facing": F, "firing_report": {...}}` — `prev_round_enemy_*` fields contain the enemy's position/facing after the previous round's movement phase (captured at the start of firing), used by Python reward functions. Values are -1 when unavailable (e.g., round 1). `firing_report` contains per-weapon fireability and to-hit TNs for both entities at the previous round's firing phase start (post-movement, pre-firing). Absent in the first observation. Contains: `rl_entity`/`opp_entity` (position, facing, delta_distance, mp_used, moved, heat) and `rl_weapons`/`opp_weapons` (per-weapon: weapon_name, weapon_index, location, destroyed, can_fire, to_hit_value, to_hit_desc, impossible).
 - **Python → Java** (action): `{"type": "action", "move_index": N}`
+- **Python → Java** (inject_state): `{"type": "inject_state", "entities": [{"id": 0, "heat": 15, "prone": true, "armor": {"CT": 5, "LA": 0}, "internal": {"LA": 2}, "weapons_destroyed": [0, 2], "crit_state": {"gyro_hits": 2, "right_leg": {"hip_hits": 1}}}]}` — Test-only mechanism for setting unit damage/heat/prone/crit state at game start. Sent as the response to the first observation (before the first action). Java parses the spec, defers application until each entity's `continueMovementFor()` fires (ensuring server state sync doesn't override), then re-enumerates legal moves and re-sends the updated observation. Only specified fields are applied; omitted fields keep defaults. Location names use BipedMek abbreviations: `HD`, `CT`, `RT`, `LT`, `RA`, `LA`, `RL`, `LL`. Entity IDs come from the observation's `units[i].id`. The `entities` list can target both RL and opponent units. The `crit_state` object supports `gyro_hits` (int) and per-leg actuator damage via `right_leg`/`left_leg` objects with `hip_hits`, `upper_leg_hits`, `lower_leg_hits`, `foot_hits` (all int). Crit slot damage is re-applied before every observation build because it doesn't survive `sendUpdateEntity` server round-trips (the serialized entity broadcast replaces client entities). Used by `dual_collector.py` and `collector.py` for deterministic test state setup.
 - Terminal observations have empty board/units/legal_moves with `terminated: true` and `game_outcome: "WIN"|"LOSS"|"DRAW"`
 
 ## Project Structure
@@ -155,6 +166,7 @@ tests/
     ├── test_damage.py        # Damage consistency via armor deltas
     ├── test_crits.py         # Crit state consistency (monotonicity, side effects, MP)
     ├── test_heat.py          # Heat consistency
+    ├── test_psr_falls.py     # PSR/fall mechanics (prone transitions, triggers, stand-up, gyro/hip)
     └── test_statistical.py   # Game distribution comparison
 ```
 

@@ -5,7 +5,9 @@ elevation changes never trigger naturally. These tests construct synthetic
 scenarios to exercise the fall mechanics.
 """
 
+import os
 import random
+from concurrent.futures import ProcessPoolExecutor
 
 import pytest
 
@@ -683,6 +685,23 @@ class TestCascadingFalls:
         assert True
 
 
+def _run_game_with_seed(seed, max_rounds=20):
+    """Run a single sim game with random actions. Top-level for pickling."""
+    game = Game(rng=random.Random(seed), max_rounds=max_rounds)
+    obs = game.reset()
+    steps = 0
+    while not obs.get("terminated") and not obs.get("truncated"):
+        n_moves = len(obs.get("legal_moves", []))
+        if n_moves == 0:
+            break
+        action = game.rng.randint(0, n_moves - 1)
+        obs = game.step(action)
+        steps += 1
+        if steps >= 200:
+            break
+    return seed, steps
+
+
 class TestFullGameWithFalls:
     """Integration: run a full game and verify it completes."""
 
@@ -702,16 +721,8 @@ class TestFullGameWithFalls:
 
     def test_many_games_with_damage_falls(self):
         """Run 20 games with random actions — no crashes from damage falls."""
-        for seed in range(20):
-            game = Game(rng=random.Random(seed), max_rounds=20)
-            obs = game.reset()
-            steps = 0
-            while not obs.get("terminated") and not obs.get("truncated"):
-                n_moves = len(obs.get("legal_moves", []))
-                if n_moves == 0:
-                    break
-                action = game.rng.randint(0, n_moves - 1)
-                obs = game.step(action)
-                steps += 1
-                if steps >= 200:
-                    break
+        workers = min(os.cpu_count() or 1, 8)
+        seeds = list(range(20))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_run_game_with_seed, seeds))
+        assert len(results) == 20

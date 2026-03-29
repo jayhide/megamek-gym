@@ -43,3 +43,9 @@ def pytest_addoption(parser):
         default=False,
         help="Use random actions in Java trace (better for damage/heat validation)",
     )
+    parser.addoption(
+        "--trace-workers",
+        default=11,
+        type=int,
+        help="Parallel workers for trace collection (1 = sequential)",
+    )

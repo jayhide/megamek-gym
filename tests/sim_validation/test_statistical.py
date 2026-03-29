@@ -6,8 +6,10 @@ aggregate statistics to catch systematic biases.
 
 from __future__ import annotations
 
+import os
 import random
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 from megamek_gym.sim.game import Game
@@ -41,49 +43,51 @@ class StatisticalResult:
         )
 
 
+def _run_single_sim_game(args: tuple) -> GameStats:
+    """Run one sim game with random play. Top-level for ProcessPoolExecutor."""
+    game_seed, max_rounds = args
+    game = Game(
+        rl_unit_name="Trebuchet TBT-5S",
+        opponent_unit_name="Trebuchet TBT-5S",
+        rl_start=(14, 1),
+        opp_start=(1, 15),
+        max_rounds=max_rounds,
+    )
+    obs = game.reset(seed=game_seed)
+
+    move_counts = []
+    while not obs.get("terminated") and not obs.get("truncated"):
+        legal_moves = obs.get("legal_moves", [])
+        move_counts.append(len(legal_moves))
+
+        if legal_moves:
+            action = game.rng.randint(0, len(legal_moves) - 1)
+        else:
+            action = 0
+
+        obs = game.step(action)
+
+    rl_damage = _compute_total_damage(game.rl_unit)
+    opp_damage = _compute_total_damage(game.opp_unit)
+
+    return GameStats(
+        rounds=game.round,
+        outcome=game.game_outcome or "DRAW",
+        total_rl_damage_taken=rl_damage,
+        total_opp_damage_taken=opp_damage,
+        avg_legal_moves=sum(move_counts) / len(move_counts) if move_counts else 0,
+    )
+
+
 def run_sim_games(n_games: int, seed: int = 42,
                   max_rounds: int = 40) -> list[GameStats]:
-    """Run N games in the Python sim with random play."""
-    results = []
+    """Run N games in the Python sim with random play (parallelized)."""
     rng = random.Random(seed)
+    args = [(rng.randint(0, 2**31), max_rounds) for _ in range(n_games)]
 
-    for i in range(n_games):
-        game = Game(
-            rl_unit_name="Trebuchet TBT-5S",
-            opponent_unit_name="Trebuchet TBT-5S",
-            rl_start=(14, 1),
-            opp_start=(1, 15),
-            max_rounds=max_rounds,
-        )
-
-        game_seed = rng.randint(0, 2**31)
-        obs = game.reset(seed=game_seed)
-
-        move_counts = []
-        while not obs.get("terminated") and not obs.get("truncated"):
-            legal_moves = obs.get("legal_moves", [])
-            move_counts.append(len(legal_moves))
-
-            if legal_moves:
-                action = game.rng.randint(0, len(legal_moves) - 1)
-            else:
-                action = 0
-
-            obs = game.step(action)
-
-        # Compute damage taken from armor state
-        rl_damage = _compute_total_damage(game.rl_unit)
-        opp_damage = _compute_total_damage(game.opp_unit)
-
-        stats = GameStats(
-            rounds=game.round,
-            outcome=game.game_outcome or "DRAW",
-            total_rl_damage_taken=rl_damage,
-            total_opp_damage_taken=opp_damage,
-            avg_legal_moves=sum(move_counts) / len(move_counts) if move_counts else 0,
-        )
-        results.append(stats)
-
+    workers = min(os.cpu_count() or 1, 8)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(_run_single_sim_game, args))
     return results
 
 
@@ -150,24 +154,29 @@ def compare_distributions(sim_games: list[GameStats],
     if not sim_games or not java_games:
         return comparison
 
-    # Game length
+    # Game length — 40% tolerance because game length has high variance with
+    # random play (one lucky headshot ends the game in 3 rounds vs 30+).
+    # With only ~5 games per engine, sample means can diverge significantly.
     sim_rounds = [g.rounds for g in sim_games]
     java_rounds = [g.rounds for g in java_games]
     comparison["game_length"] = _compare_metric(
         "game_length", sim_rounds, java_rounds, tolerance=0.4
     )
 
-    # Win rate (RL wins)
+    # Win rate — 30% tolerance because with ~5 games, each game shifts the
+    # rate by 20%. Even identical engines can show 0.6 vs 0.4 by chance.
     sim_wins = sum(1 for g in sim_games if g.outcome == "WIN") / len(sim_games)
     java_wins = sum(1 for g in java_games if g.outcome == "WIN") / len(java_games)
     comparison["win_rate"] = {
         "sim": f"{sim_wins:.2f}",
         "java": f"{java_wins:.2f}",
         "diff": f"{abs(sim_wins - java_wins):.2f}",
-        "ok": abs(sim_wins - java_wins) < 0.3,  # Generous for small sample
+        "ok": abs(sim_wins - java_wins) < 0.3,
     }
 
-    # Average legal moves
+    # Average legal moves — 30% tolerance because move count depends on
+    # board position (corner vs center), prone state, and damage — all of
+    # which are stochastic with random play.
     sim_avg_moves = [g.avg_legal_moves for g in sim_games]
     java_avg_moves = [g.avg_legal_moves for g in java_games]
     comparison["avg_legal_moves"] = _compare_metric(
