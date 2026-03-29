@@ -131,6 +131,14 @@ def _compare_weapons_for_entity(
     """Compare Python fireability + TNs against Java for one entity."""
     comparisons = []
 
+    # Build index of Python weapons by (name, location) for matching.
+    # Track which Python weapons have been claimed to handle duplicates.
+    py_by_name_loc: dict[tuple[str, int], list[int]] = {}
+    for i, w in enumerate(unit.template.weapons):
+        key = (w.name, int(w.location))
+        py_by_name_loc.setdefault(key, []).append(i)
+    py_claimed: set[int] = set()
+
     for jw in java_weapons:
         weapon_name = jw["weapon_name"]
         weapon_index = jw["weapon_index"]
@@ -141,14 +149,19 @@ def _compare_weapons_for_entity(
         java_tn = jw.get("to_hit_value") if java_can_fire and not java_impossible else None
         java_desc = jw.get("to_hit_desc", "")
 
-        # Find matching Python weapon by index in template weapons list
-        # Java weapon_index is getEquipmentNum, but weapons are listed in
-        # the same order as getWeaponList(), which matches template.weapons order
-        py_weapon_idx = len(comparisons)  # weapons come in order
+        # Match Java weapon to Python weapon by name + location
         python_can_fire = False
         python_tn = None
+        key = (weapon_name, location)
+        candidates = py_by_name_loc.get(key, [])
+        py_weapon_idx = None
+        for idx in candidates:
+            if idx not in py_claimed:
+                py_weapon_idx = idx
+                py_claimed.add(idx)
+                break
 
-        if py_weapon_idx < len(unit.template.weapons):
+        if py_weapon_idx is not None:
             w = unit.template.weapons[py_weapon_idx]
             # Check Python fireability
             if (not unit.weapon_destroyed[py_weapon_idx]
@@ -214,12 +227,25 @@ def validate_firing_single_round(
             opp_owner_id = u["owner"]
             break
 
+    # In dual-bot mode, each bot labels ITSELF as "rl" in its firing report.
+    # Use the owner field (added to entity firing state) to correctly map
+    # firing_report entities to the test's RL/opponent entities.
+    rl_entity_state = firing_report.get("rl_entity")
+    opp_entity_state = firing_report.get("opp_entity")
+    fr_rl_owner = rl_entity_state.get("owner") if rl_entity_state else None
+    if fr_rl_owner is not None and fr_rl_owner != rl_owner_id:
+        # Swap: firing_report's "rl" is actually the test's opponent
+        rl_key, opp_key = "opp_entity", "rl_entity"
+        rl_wkey, opp_wkey = "opp_weapons", "rl_weapons"
+    else:
+        rl_key, opp_key = "rl_entity", "opp_entity"
+        rl_wkey, opp_wkey = "rl_weapons", "opp_weapons"
+
     results = []
-    for entity_label, entity_key, owner_id, target_owner_id in [
-        ("rl", "rl_entity", rl_owner_id, opp_owner_id),
-        ("opp", "opp_entity", opp_owner_id, rl_owner_id),
+    for entity_label, entity_key, weapons_key, owner_id, target_owner_id in [
+        ("rl", rl_key, rl_wkey, rl_owner_id, opp_owner_id),
+        ("opp", opp_key, opp_wkey, opp_owner_id, rl_owner_id),
     ]:
-        weapons_key = f"{entity_label}_weapons"
         java_weapons = firing_report.get(weapons_key, [])
         entity_state = firing_report.get(entity_key)
 
@@ -259,9 +285,8 @@ def validate_firing_single_round(
         target = reconstruct_unit(target_dict, template_name)
         set_firing_state(unit, entity_state)
 
-        target_state = firing_report.get(
-            "opp_entity" if entity_label == "rl" else "rl_entity"
-        )
+        target_entity_key = opp_key if entity_label == "rl" else rl_key
+        target_state = firing_report.get(target_entity_key)
         if target_state:
             set_firing_state(target, target_state)
 

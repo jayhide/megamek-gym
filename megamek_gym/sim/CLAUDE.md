@@ -20,7 +20,7 @@ MegaMekSimEnv (gymnasium.Env)
         ├── Board (16x17 hex grid, terrain, elevation)
         ├── Unit × 2 (state: armor, weapons, heat, position)
         ├── Movement (BFS move enumeration, PSR filtering)
-        ├── LosTable (precomputed LOS for all 272×272 hex pairs)
+        ├── LosTable (precomputed LOS + terrain modifier + partial cover for all 272×272 hex pairs)
         ├── Firing (to-hit calc, hit location, damage, crits)
         ├── Heat (generation, dissipation, shutdown/explosion)
         └── Princess (heuristic opponent: score_move → select best)
@@ -33,9 +33,9 @@ MegaMekSimEnv (gymnasium.Env)
 | `board.py` | Hex grid with hardcoded Woodland terrain data. Odd-column offset coords. Singleton `BOARD` instance. |
 | `unit.py` | `UnitTemplate` (static data) + `Unit` (mutable game state). TBT-5S hardcoded. Hit location tables, cluster hit table, damage transfer map. |
 | `movement.py` | Move enumeration (default: deque-relaxation port of Java's `LongestPathFinder`; also has BFS). Tracks walk vs run paths, PSR probability filtering (< 0.3 = rejected). Pre-computed neighbor table. |
-| `los.py` | Geometric hex-line LOS algorithm ported from Java's `IdealHex`/`Coords.intervening()`. `LosTable` precomputes all pairs once (~2.3s), cached across resets. |
-| `firing.py` | `compute_to_hit()` (gunnery + range + movement + TMM + terrain + heat modifiers), `roll_hit_location()` (front/left/right/rear tables), `apply_damage()` (armor → internal → transfer → crits). Reuses `in_firing_arc_with_twist()` from `reward.py`. |
-| `heat.py` | Running = +2 heat, weapon heat per weapon, engine damage = +5 heat per engine hit per turn. Dissipate = min(heat, sinks). Shutdown check at 14+ heat, ammo explosion at 19+. |
+| `los.py` | Geometric hex-line LOS algorithm ported from Java's `IdealHex`/`Coords.intervening()`. `LosTable` precomputes LOS, terrain modifier, and partial cover for all pairs once (~2.3s), cached across resets. |
+| `firing.py` | `compute_to_hit()` (gunnery + range + movement + TMM + terrain + partial cover + heat modifiers), `roll_hit_location()` (front/left/right/rear tables), `apply_damage()` (armor → internal → transfer → crits). Reuses `in_firing_arc_with_twist()` from `reward.py`. |
+| `heat.py` | Walking = +1 heat, running = +2 heat, weapon heat per weapon, engine damage = +5 heat per engine hit per turn. Dissipate = min(heat, sinks). Shutdown check at 14+ heat (TNs match Java's `HeatResolver`: 14→4, 18→6, 22→8, 26→10, 30→12). Ammo explosion at 19+ (TNs not yet cross-validated — see future work below). |
 | `princess.py` | Ports Java's `BasicPathRanker.rankPath()` formula for 1v1: `utility = -fallMod + braveryMod - aggressionMod - herdingMod - facingMod`. Uses Java's default behavior weights and quick damage estimate (maxDmgAtRange × 0.42). Herding = distance to own current position × 1.0 (self-herding in 1v1). |
 | `game.py` | Round loop: initiative roll → movement (loser first) → simultaneous firing → heat → end checks. Caches RL legal moves between `_build_observation()` and `step()`. |
 | `env.py` | `MegaMekSimEnv(gymnasium.Env)` — drop-in replacement for `MegaMekEnv`. Same obs/action spaces, reuses `observation.py` and `reward.py`. |
@@ -76,6 +76,7 @@ while True:
 - **PSR / mid-movement falls**: The sim models mid-movement falls from PSR failures. Each move dict stores the full hex path traversed during enumeration. During move execution in `game.py`, `_resolve_movement_psrs()` walks the path hex-by-hex and rolls an independent PSR (2d6 vs piloting skill + damage modifiers) at each elevation change >= 2 levels. On the first failure: the unit falls at that hex (prone, random facing via 1d6), takes fall damage (`tonnage // 10 * (fall_height + 1)`, where fall_height is the elevation drop for downhill or 0 for uphill/flat), and attempts automated recovery — if enough remaining MP (>= 2), rolls a stand-up PSR, and on success walks greedily toward the original destination with remaining MP (walk only, no running after a fall). This replaces the previous atomic model. Paths with <30% cumulative PSR success are still pre-filtered during enumeration. Note: on the Woodland board, max adjacent elevation diff is 1, so PSR falls from elevation changes do not trigger naturally; they will matter on boards with cliff hexes. Remaining simplifications vs Java: no skid PSR, no terrain-based PSR (rubble, water, ice), fall damage applied to a single random front-hit location rather than potentially multiple locations.
 - **Damage-induced falls**: Implemented via a pending PSR queue on Unit. Three triggers: (1) 20+ damage in a phase — PSR with modifier `damage // 20`; (2) gyro crit — first hit PSR +3, second hit (destroyed) automatic fall; (3) hip actuator crit PSR +2, leg actuator crit PSR +1. Leg destruction also queues automatic fall (with fall damage + facing randomization, replacing the old direct `prone = True`). PSRs are resolved after firing via `Game._resolve_pending_psrs()` which handles cascading (fall damage can trigger crits that queue more PSRs). Weight class modifier not used (TAC OPS optional rule).
 - **Ammo explosion from crits**: Simplified (full bin explodes at once)
+- **Ammo explosion from heat**: TNs not yet cross-validated against Java's `HeatResolver.java`. The sim uses `roll >= tn` to trigger (tn: 19→8, 23→6, 28→4), but Java uses `roll < tn` to trigger (tn: 19→4, 23→6, 28→8) — these are different roll conventions giving different probabilities. Future work: fix the TNs and add cross-validation tests.
 - **Starting facing**: Computed toward opponent using `hex_bearing`, matching Java's `Coords.direction()`
 
 ## Adding New Units
@@ -91,6 +92,8 @@ Currently the Woodland board is hardcoded. To add a new board:
 2. The `LosTable` will recompute automatically for any board size
 
 ## Cross-Validation Against Java MegaMek
+
+The purpose of sim validation testing is to identify **all** gaps between the Python sim and Java MegaMek, then close those gaps by making the sim more accurate. Tests should be strict — they must not be lenient or accept known divergences as "good enough." If a test reveals a mismatch, the correct response is to fix the sim (or, rarely, the test), not to loosen tolerances or add exceptions. The sim's value as a training environment depends on faithfully reproducing Java MegaMek's behavior.
 
 Run `validate_sim.py` to compare the Python sim against a live Java MegaMek game:
 
@@ -129,7 +132,8 @@ poetry run python validate_sim.py --megamek-dir ../megamek --only legal_moves --
   - **Path storage**: Each move dict includes a `"path"` field — a tuple of `(x, y)` hexes entered via FORWARD steps during BFS/deque enumeration. Used by `game.py` to walk the path hex-by-hex for PSR fall resolution. Paths are short (typically 3-5 hexes for Trebuchet).
   - **`max_moves` cap removed**: `enumerate_moves()` returns all paths; truncation for the RL observation space is handled by the env layer (`config.max_legal_moves`).
   - Leg actuator damage reduces MP matching Java's `BipedMek.getWalkMP()` (hip = halve MP, each non-hip actuator crit = -1 MP).
-- **Firing**: `compute_to_hit()` includes base gunnery, range modifier, min range penalty, attacker movement (+1/+2 walk/run), TMM, heat gunnery modifier, terrain (intervening + target woods with elevation gating), attacker prone (+2, leg weapons impossible), target prone (-2 adjacent / +1 at range), target immobile (-4), arm actuator damage (shoulder +4, upper/lower arm +1 each), sensor damage (+2 per sensor hit). `resolve_firing()` blocks all fire when sensors are destroyed (2+ hits) and enforces prone arm restriction (biped can only fire arm weapons from one arm when prone). Validated against Java's `WeaponAttackAction.toHit()` via `firing_report` telemetry. Known gaps: rare arc edge cases.
+- **Firing**: `compute_to_hit()` includes base gunnery, range modifier, min range penalty, attacker movement (+1/+2 walk/run), TMM, heat gunnery modifier, terrain (intervening + target woods with elevation gating), partial cover (+1 when intervening hex adjacent to target has elevation == target height, precomputed in `LosTable`), attacker prone (+2, leg weapons impossible), target prone (-2 adjacent / +1 at range), target immobile (-4), arm actuator damage (shoulder +4, upper/lower arm +1 each), sensor damage (+2 per sensor hit). `resolve_firing()` blocks all fire when sensors are destroyed (2+ hits) and enforces prone arm restriction (biped can only fire arm weapons from one arm when prone). Validated against Java's `WeaponAttackAction.toHit()` via `firing_report` telemetry. Known gaps: rare arc edge cases.
+- **PSR/Falls**: Cross-validated via deterministic state injection: `gyro_destroyed_trace` (both units gyro_hits=2, reduced limb armor) validates that PSR triggers cause falls when gyro auto-fails, `hip_damaged_trace` validates MP halving from hip actuator damage. `test_psr_falls.py` checks: every fall has a valid trigger, combat gyro destruction causes fall, stand-up requires sufficient MP, and fall events occur in damaged traces. Known limitation: observation deltas span multiple sub-phases, so single-phase damage (20+ PSR trigger) can't be accurately isolated from total step damage.
 - Board, unit template, distances, to-hit components, damage consistency, heat consistency all **pass**.
 
 ### Java-side per-move debug logging

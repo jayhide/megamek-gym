@@ -13,9 +13,11 @@ if TYPE_CHECKING:
 
 def apply_heat(unit: Unit, heat_generated: int) -> None:
     """Add heat from weapons fire and movement."""
-    # Running generates +2 heat
+    # Movement heat: walking = +1, running = +2 (Total Warfare p.153)
     if unit.movement_type == "run":
         heat_generated += 2
+    elif unit.movement_type == "walk":
+        heat_generated += 1
 
     # Engine damage: +5 heat per damaged engine slot (fusion only)
     heat_generated += 5 * unit.engine_hits
@@ -61,15 +63,19 @@ def check_overheat(unit: Unit, rng: random.Random | None = None) -> dict:
                 return effects
 
     # Shutdown check (heat >= 14)
+    # TNs match Java's HeatResolver: tn = 4 + (((heat - 14) / 4) * 2)
+    # Roll >= tn avoids shutdown, so roll < tn triggers it.
     if unit.heat >= 14:
-        if unit.heat >= 26:
-            tn = 6  # Very likely shutdown
+        if unit.heat >= 30:
+            tn = 12  # Nearly automatic shutdown
+        elif unit.heat >= 26:
+            tn = 10
         elif unit.heat >= 22:
             tn = 8
         elif unit.heat >= 18:
-            tn = 10
+            tn = 6
         elif unit.heat >= 14:
-            tn = 12  # Very unlikely
+            tn = 4  # Very unlikely shutdown
         else:
             return effects
 

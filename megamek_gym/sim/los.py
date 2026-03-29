@@ -616,16 +616,113 @@ def compute_terrain_modifier(board: Board, x1: int, y1: int,
                                            tgt_abs_height, x1, y1, x2, y2)
 
 
+def _has_partial_cover_straight(board: Board, line: list[tuple[int, int]],
+                                 x1: int, y1: int,
+                                 x2: int, y2: int) -> bool:
+    """Check for partial cover along a straight LOS line.
+
+    Returns True if an intervening hex adjacent to the target has elevation
+    equal to target absolute height (target_hex_elev + 1 for standing mech).
+    """
+    tgt_elev = board.elevation(x2, y2)
+    atk_elev = board.elevation(x1, y1)
+    if atk_elev > tgt_elev:
+        return False
+
+    total_distance = len(line) - 1
+    for step_idx, (hx, hy) in enumerate(line):
+        if step_idx == 0 or step_idx == total_distance:
+            continue
+        if not board.in_bounds(hx, hy):
+            continue
+        if hex_distance(x2, y2, hx, hy) != 1:
+            continue
+        if board.elevation(hx, hy) == tgt_elev + 1:
+            return True
+    return False
+
+
+def _has_partial_cover_divided(board: Board, triplets: list[tuple[int, int]],
+                                x1: int, y1: int,
+                                x2: int, y2: int) -> bool:
+    """Check for partial cover along a divided LOS line.
+
+    Defender's choice: cover applies if EITHER path has a qualifying hex.
+    """
+    tgt_elev = board.elevation(x2, y2)
+    atk_elev = board.elevation(x1, y1)
+    if atk_elev > tgt_elev:
+        return False
+
+    n = len(triplets)
+    total_steps = (n - 1) // 3 if n > 1 else 0
+    if total_steps <= 0:
+        return False
+
+    cover_threshold = tgt_elev + 1
+
+    # Non-split hexes (shared by both paths)
+    for group_idx in range(total_steps):
+        non_split_idx = 3 + group_idx * 3
+        if non_split_idx >= n:
+            break
+        hx, hy = triplets[non_split_idx]
+        if (hx, hy) == (x1, y1) or (hx, hy) == (x2, y2):
+            continue
+        if not board.in_bounds(hx, hy):
+            continue
+        if hex_distance(x2, y2, hx, hy) == 1 and board.elevation(hx, hy) == cover_threshold:
+            return True
+
+    # Split pairs
+    for group_idx in range(total_steps):
+        left_idx = 1 + group_idx * 3
+        right_idx = 2 + group_idx * 3
+        if right_idx >= n:
+            break
+        for idx in (left_idx, right_idx):
+            hx, hy = triplets[idx]
+            if (hx, hy) == (x1, y1) or (hx, hy) == (x2, y2):
+                continue
+            if not board.in_bounds(hx, hy):
+                continue
+            if hex_distance(x2, y2, hx, hy) == 1 and board.elevation(hx, hy) == cover_threshold:
+                return True
+
+    return False
+
+
+def compute_partial_cover(board: Board, x1: int, y1: int,
+                           x2: int, y2: int) -> bool:
+    """Check if target at (x2,y2) has partial cover from attacker at (x1,y1).
+
+    Matches Java's LosEffects partial cover: an intervening hex adjacent to
+    the target with elevation == target_hex_elev + 1, when attacker elevation
+    <= target elevation. Does not account for target prone (checked separately).
+    """
+    if x1 == x2 and y1 == y2:
+        return False
+
+    deg = _degree(x1, y1, x2, y2)
+    if deg % 60 == 30:
+        triplets = _intervening_split(x1, y1, x2, y2)
+        return _has_partial_cover_divided(board, triplets, x1, y1, x2, y2)
+    else:
+        line = _intervening(x1, y1, x2, y2)
+        return _has_partial_cover_straight(board, line, x1, y1, x2, y2)
+
+
 class LosTable:
-    """Precomputed LOS + terrain modifier lookup table for all hex pairs."""
+    """Precomputed LOS + terrain modifier + partial cover lookup for all hex pairs."""
 
     def __init__(self, board: Board) -> None:
         self.board = board
         w, h = board.width, board.height
         size = w * h * w * h
-        # Parallel flat arrays: LOS boolean + terrain modifier int
+        # Parallel flat arrays: LOS boolean + terrain modifier int + partial cover boolean
         self._los = [False] * size
         self._mod = [0] * size
+        self._cover = [False] * size
         self._w = w
         self._h = h
         self._compute()
@@ -644,6 +741,9 @@ class LosTable:
                         self._mod[flat] = compute_terrain_modifier(
                             board, x1, y1, x2, y2
                         )
+                        self._cover[flat] = compute_partial_cover(
+                            board, x1, y1, x2, y2
+                        )
 
     def has_los(self, x1: int, y1: int, x2: int, y2: int) -> bool:
         idx1 = y1 * self._w + x1
@@ -655,3 +755,9 @@ class LosTable:
         idx1 = y1 * self._w + x1
         idx2 = y2 * self._w + x2
         return self._mod[idx1 * self._w * self._h + idx2]
+
+    def has_partial_cover(self, x1: int, y1: int, x2: int, y2: int) -> bool:
+        """Cached partial cover check for target at (x2,y2) from attacker at (x1,y1)."""
+        idx1 = y1 * self._w + x1
+        idx2 = y2 * self._w + x2
+        return self._cover[idx1 * self._w * self._h + idx2]

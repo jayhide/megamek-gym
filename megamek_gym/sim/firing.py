@@ -104,6 +104,11 @@ def compute_to_hit(attacker: Unit, target: Unit, weapon: WeaponData,
     tn += los_table.terrain_modifier(attacker.x, attacker.y,
                                      target.x, target.y)
 
+    # Partial cover modifier (+1 when intervening hex elevation provides cover)
+    if not target.prone and los_table.has_partial_cover(
+            attacker.x, attacker.y, target.x, target.y):
+        tn += 1
+
     # Attacker prone: leg weapons impossible, arm-destroyed blocks all
     if attacker.prone:
         if weapon.location in (Location.RL, Location.LL):

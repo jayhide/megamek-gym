@@ -119,6 +119,36 @@ def validate_damage_step(prev_obs: dict, curr_obs: dict,
     return errors
 
 
+def count_location_destructions(
+    trace_steps: list, owner_id: int,
+) -> list[tuple[int, str]]:
+    """Scan trace for location destruction events (internal >0 → ≤0).
+
+    Returns list of (step_idx, location_name) tuples.
+    """
+    destructions = []
+
+    for i in range(1, len(trace_steps)):
+        prev_obs = trace_steps[i - 1].raw_obs
+        curr_obs = trace_steps[i].raw_obs
+
+        prev_unit = extract_unit_state(prev_obs, owner_id)
+        curr_unit = extract_unit_state(curr_obs, owner_id)
+        if prev_unit is None or curr_unit is None:
+            continue
+
+        prev_armor = prev_unit.get("armor", [])
+        curr_armor = curr_unit.get("armor", [])
+
+        for loc_i, (pa, ca) in enumerate(zip(prev_armor, curr_armor)):
+            pi = pa.get("internal", 0)
+            ci = ca.get("internal", 0)
+            if pi > 0 and ci <= 0:
+                destructions.append((trace_steps[i].step_idx, LOC_NAMES[loc_i]))
+
+    return destructions
+
+
 def validate_damage_trace(trace_steps: list, rl_owner_id: int) -> DamageValidationResult:
     """Validate damage consistency across all consecutive step pairs."""
     result = DamageValidationResult()
