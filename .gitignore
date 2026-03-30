@@ -25,4 +25,13 @@ inspected_games/
 # Generated artifacts
 *.html
 *.png
+*.npz
 game_viewer_saves*/
+game_viewer.json
+output.txt
+
+# Test save directories
+test_*_saves_*/
+
+# Claude Code
+.claude/
