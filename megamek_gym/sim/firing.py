@@ -219,6 +219,11 @@ def resolve_firing(attacker: Unit, target: Unit, board: Board,
     total_heat = 0
     hits: list[dict] = []
 
+    # Shutdown: cannot fire at all
+    if attacker.shutdown:
+        return {"attacker": attacker.entity_id, "target": target.entity_id,
+                "heat_generated": 0, "total_damage": 0, "hits": []}
+
     # Sensors destroyed: cannot fire at all
     if attacker.sensor_hits >= 2:
         return {"attacker": attacker.entity_id, "target": target.entity_id,

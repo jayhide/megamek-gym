@@ -1,10 +1,24 @@
-"""Tests for heat-based MP reduction in the Python sim."""
+"""Tests for heat-based MP reduction and startup/shutdown in the Python sim."""
 
 import pytest
 
 from megamek_gym.sim.unit import UNIT_TEMPLATES, Unit, Location
 from megamek_gym.sim.board import BOARD
+from megamek_gym.sim.heat import attempt_startup, check_overheat
 from megamek_gym.sim.movement import enumerate_moves
+
+
+class _FixedRng:
+    """Mock RNG that returns predetermined randint values in sequence."""
+
+    def __init__(self, values: list[int]):
+        self._values = list(values)
+        self._idx = 0
+
+    def randint(self, a: int, b: int) -> int:
+        val = self._values[self._idx]
+        self._idx += 1
+        return val
 
 
 def _make_unit(heat=0) -> Unit:
@@ -71,8 +85,89 @@ class TestHeatMPReduction:
         # base 5 - 2 actuator - 4 heat = -1, clamped to 0
         assert unit.walk_mp == 0
 
-    def test_shutdown_unit_no_moves(self):
+    def test_shutdown_unit_stand_still_only(self):
+        """Shutdown unit gets exactly 1 legal move: stand still at current pos."""
         unit = _make_unit()
         unit.shutdown = True
         moves = enumerate_moves(unit, BOARD)
-        assert moves == []
+        assert len(moves) == 1
+        m = moves[0]
+        assert m["dest_x"] == unit.x
+        assert m["dest_y"] == unit.y
+        assert m["facing"] == unit.facing
+        assert m["mp_used"] == 0
+
+
+class TestStartup:
+    """Tests for attempt_startup() matching Java HeatResolver lines 568-645."""
+
+    def test_not_shutdown_returns_none(self):
+        unit = _make_unit(heat=20)
+        assert attempt_startup(unit) is None
+        assert not unit.shutdown
+
+    def test_auto_restart_below_14(self):
+        unit = _make_unit(heat=10)
+        unit.shutdown = True
+        event = attempt_startup(unit)
+        assert not unit.shutdown
+        assert event["type"] == "startup"
+        assert event["auto"] is True
+
+    def test_no_startup_at_heat_30(self):
+        """Heat >= 30: auto-shutdown threshold, cannot attempt startup."""
+        unit = _make_unit(heat=30)
+        unit.shutdown = True
+        event = attempt_startup(unit)
+        assert event is None
+        assert unit.shutdown
+
+    def test_startup_roll_success(self):
+        """Heat 14, TN=4: roll of 2+2=4 succeeds."""
+        unit = _make_unit(heat=14)
+        unit.shutdown = True
+        event = attempt_startup(unit, _FixedRng([2, 2]))  # 2d6 = 4
+        assert event["type"] == "startup"
+        assert not unit.shutdown
+        assert event["tn"] == 4
+        assert event["roll"] == 4
+
+    def test_startup_roll_failure(self):
+        """Heat 14, TN=4: roll of 1+2=3 fails."""
+        unit = _make_unit(heat=14)
+        unit.shutdown = True
+        event = attempt_startup(unit, _FixedRng([1, 2]))  # 2d6 = 3
+        assert event["type"] == "startup_failed"
+        assert unit.shutdown
+        assert event["tn"] == 4
+        assert event["roll"] == 3
+
+    def test_startup_tn_formula(self):
+        """Verify TN = 4 + floor((heat-14)/4) * 2 for each heat bracket."""
+        expected_tns = {14: 4, 17: 4, 18: 6, 21: 6, 22: 8, 25: 8, 26: 10, 29: 10}
+        # Roll high enough to always succeed, so we can read the TN from the event
+        high_roll = _FixedRng([6, 6])
+        for heat, expected_tn in expected_tns.items():
+            unit = _make_unit(heat=heat)
+            unit.shutdown = True
+            high_roll._idx = 0  # reuse
+            event = attempt_startup(unit, high_roll)
+            assert event["tn"] == expected_tn, f"heat={heat}: expected TN {expected_tn}, got {event['tn']}"
+
+    def test_startup_clears_shutdown(self):
+        """Successful startup clears the shutdown flag."""
+        unit = _make_unit(heat=18)
+        unit.shutdown = True
+        # TN=6, roll 6 → success
+        event = attempt_startup(unit, _FixedRng([3, 3]))
+        assert event["type"] == "startup"
+        assert not unit.shutdown
+
+    def test_startup_failure_preserves_shutdown(self):
+        """Failed startup leaves shutdown flag set."""
+        unit = _make_unit(heat=18)
+        unit.shutdown = True
+        # TN=6, roll 5 → failure
+        event = attempt_startup(unit, _FixedRng([3, 2]))
+        assert event["type"] == "startup_failed"
+        assert unit.shutdown

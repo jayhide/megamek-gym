@@ -161,8 +161,15 @@ def enumerate_moves(unit: Unit, board: Board,
     *algorithm*: ``"deque"`` (default, Java LongestPathFinder port with
     Pareto-deque relaxation) or ``"bfs"`` (simpler multi-objective BFS).
     """
-    if unit.destroyed or unit.shutdown or not unit.deployed:
+    if unit.destroyed or not unit.deployed:
         return []
+
+    # Shutdown: exactly 1 legal move (stand still), matching Java's
+    # RLBotClient.enumerateLegalMoves() which always adds an empty MovePath
+    # before pathfinding.  getRunMP() returns 0 for shutdown units, so only
+    # the stand-still survives.
+    if unit.shutdown:
+        return _stand_still_moves(unit)
 
     # Enemy hex is blocked during pathfinding AND filtered from output.
     # Java's MovePathLegalityFilter calls isMovementPossible() on every

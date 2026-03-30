@@ -30,7 +30,7 @@ import gymnasium
 import numpy as np
 
 import megamek_gym  # noqa: F401 — registers the env
-from megamek_gym.agent import load_agent, load_config_from_checkpoint, load_hierarchical_agent, select_action, OUTCOME_MAP
+from megamek_gym.agent import load_agent, load_config_from_checkpoint, load_hierarchical_agent, load_spatial_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
 from megamek_gym.reward import CompositeReward
 
@@ -101,22 +101,40 @@ def _select_hierarchical(agent, obs, action_mask, device, deterministic, is_rand
 
     with torch.no_grad():
         if deterministic:
-            from megamek_gym.observation import DEST_FEATURES
+            from megamek_gym.agent import SpatialHierarchicalAgent
+            if isinstance(agent, SpatialHierarchicalAgent):
+                # Spatial agent: use CNN dest_head (1x1 conv) + facing_head
+                base, board = agent._split_obs(obs_t)
+                hex_features = agent.spatial_encoder(board)
+                dest_logits = agent.dest_head(hex_features).view(-1, agent.n_hexes)
+                dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
+                dest = dest_logits.argmax(dim=1)
 
-            features = agent.feature_net(obs_t)
-            dest_logits = agent.dest_head(features)
-            dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
-            dest = dest_logits.argmax(dim=1)
+                hex_y = dest // agent.board_w
+                hex_x = dest % agent.board_w
+                selected_hex_feats = hex_features[0, :, hex_y, hex_x].view(1, -1)
+                facing_input = torch.cat([selected_hex_feats, base], dim=-1)
+                facing_logits = agent.facing_head(facing_input)
+                batch_fm = fm_t[torch.arange(1), dest]
+                facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
+                facing = facing_logits.argmax(dim=1)
+            else:
+                # HierarchicalAgent: use feature_net + dest_head (linear)
+                from megamek_gym.observation import DEST_FEATURES
+                features = agent.feature_net(obs_t)
+                dest_logits = agent.dest_head(features)
+                dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
+                dest = dest_logits.argmax(dim=1)
 
-            off = agent.dest_block_offset
-            dest_start = off + dest * DEST_FEATURES
-            idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES, device=obs_t.device)
-            dest_feats = obs_t.gather(1, idx)
-            facing_input = torch.cat([features, dest_feats], dim=-1)
-            facing_logits = agent.facing_head(facing_input)
-            batch_fm = fm_t[torch.arange(1), dest]
-            facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
-            facing = facing_logits.argmax(dim=1)
+                off = agent.dest_block_offset
+                dest_start = off + dest * DEST_FEATURES
+                idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES, device=obs_t.device)
+                dest_feats = obs_t.gather(1, idx)
+                facing_input = torch.cat([features, dest_feats], dim=-1)
+                facing_logits = agent.facing_head(facing_input)
+                batch_fm = fm_t[torch.arange(1), dest]
+                facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
+                facing = facing_logits.argmax(dim=1)
 
             return np.array([dest.item(), facing.item()])
         else:
@@ -170,6 +188,19 @@ def play_game(env, agent, device, deterministic, max_steps, hierarchical=False):
         else:
             action = np.random.randint(0, max(n_legal, 1))
 
+        # Save pre-step state for final snapshot reconstruction
+        prev_raw = env.unwrapped._last_raw_obs
+        prev_legal = list(prev_raw.get("legal_moves", []))
+        prev_units = copy.deepcopy(prev_raw.get("units", []))
+        if env.unwrapped._use_cnn:
+            prev_hex_map = dict(env.unwrapped._hex_move_lookup)
+        elif hierarchical:
+            # Java env uses _dest_facing_to_move_index, sim env uses _dest_lookup
+            dm = getattr(env.unwrapped, '_dest_facing_to_move_index', None)
+            if dm is None:
+                dm = getattr(env.unwrapped, '_dest_lookup', {})
+            prev_dest_map = dict(dm)
+
         obs, reward, terminated, truncated, info = env.step(action)
         n_legal = info.get("n_legal_moves", 0)
         episode_return += reward
@@ -193,6 +224,40 @@ def play_game(env, agent, device, deterministic, max_steps, hierarchical=False):
         })
 
         if terminated or truncated:
+            # Add final snapshot showing end-state positions (no reachable hexes)
+            if snapshots and prev_legal:
+                final_units = copy.deepcopy(prev_units)
+                # Resolve action to flat move index (same logic as env.step)
+                if env.unwrapped._use_cnn:
+                    hex_idx, facing = int(action[0]), int(action[1])
+                    bw = env.unwrapped.config.resolved_board_width
+                    hx, hy = hex_idx % bw, hex_idx // bw
+                    move_index = prev_hex_map.get((hx, hy, facing), 0)
+                elif hierarchical:
+                    dest_idx, facing = int(action[0]), int(action[1])
+                    move_index = prev_dest_map.get((dest_idx, facing), 0)
+                else:
+                    move_index = int(action)
+                if 0 <= move_index < len(prev_legal):
+                    move = prev_legal[move_index]
+                    for u in final_units:
+                        if u.get("owner") == rl_owner_id:
+                            u["x"] = move["dest_x"]
+                            u["y"] = move["dest_y"]
+                            u["facing"] = move["facing"]
+                            break
+                snapshots.append(StepSnapshot(
+                    step_idx=step,
+                    game_round=snapshots[-1].game_round,
+                    phase="FINISHED",
+                    board=copy.deepcopy(snapshots[-1].board),
+                    units=final_units,
+                    legal_moves=[],
+                    n_legal=0,
+                    action_taken=-1,
+                    rl_owner_id=rl_owner_id,
+                ))
+
             status = "terminated" if terminated else "truncated"
             print(f"  Game ended ({status}) at step {step}")
             break
@@ -304,6 +369,7 @@ def build_combined_html(svgs, step_meta, round_data, outcome, title, verbose, en
   .combat-miss {{ color: #888; }}
   .damage-rl {{ color: #d9534f; }}
   .damage-enemy {{ color: #5cb85c; }}
+  .heat-event {{ color: #ff6600; font-weight: bold; }}
   .unit-status {{ margin: 2px 0; }}
   .unit-name {{ font-weight: bold; }}
   .armor-good {{ color: #5cb85c; }}
@@ -495,6 +561,23 @@ function renderRound(rd, cutoff) {{
     }}
   }}
 
+  // Heat events (ammo explosion, shutdown)
+  if (rd.heat_events && rd.heat_events.length > 0) {{
+    h += `<div class="section-label">Heat phase</div>`;
+    for (const ev of rd.heat_events) {{
+      if (ev.type === 'ammo_explosion') {{
+        h += `<div class="heat-event">${{escHtml(ev.name)}}: AMMO EXPLOSION at heat ${{ev.heat}} &mdash; unit destroyed!</div>`;
+      }} else if (ev.type === 'shutdown') {{
+        h += `<div class="heat-event">${{escHtml(ev.name)}}: SHUTDOWN at heat ${{ev.heat}}</div>`;
+      }} else if (ev.type === 'startup') {{
+        const how = ev.auto ? 'auto (heat < 14)' : `rolled ${{ev.roll}} vs TN ${{ev.tn}}`;
+        h += `<div class="heat-event">${{escHtml(ev.name)}}: STARTUP (${{how}}) at heat ${{ev.heat}}</div>`;
+      }} else if (ev.type === 'startup_failed') {{
+        h += `<div class="heat-event">${{escHtml(ev.name)}}: startup failed (rolled ${{ev.roll}} vs TN ${{ev.tn}}) at heat ${{ev.heat}}</div>`;
+      }}
+    }}
+  }}
+
   // Unit status
   if (rd.unit_status && rd.unit_status.length > 0) {{
     h += `<div class="section-label">Unit status</div>`;
@@ -660,14 +743,10 @@ def main():
 
     if args.sim:
         from megamek_gym.sim.env import MegaMekSimEnv
-        env = MegaMekSimEnv(
-            rl_unit=cfg.rl_unit,
-            opponent_unit=cfg.opponent_unit,
-            max_game_rounds=cfg.max_game_rounds,
-            max_destinations=getattr(cfg, "max_destinations", 125),
-            board_width=getattr(cfg, "board_width", 16) or 16,
-            board_height=getattr(cfg, "board_height", 17) or 17,
-        )
+        cfg.backend = "sim"
+        if cfg.action_space_type != "hierarchical":
+            cfg.action_space_type = "hierarchical"
+        env = MegaMekSimEnv(config=cfg)
     else:
         cfg.megamek_dir = args.megamek_dir
         if args.port is not None:
@@ -681,12 +760,19 @@ def main():
     # Load trained policy if provided
     agent = None
     device = None
-    hierarchical = getattr(cfg, "action_space_type", "hierarchical") == "hierarchical"
+    use_cnn = getattr(cfg, "use_cnn", False)
+    hierarchical = getattr(cfg, "action_space_type", "hierarchical") == "hierarchical" or use_cnn
     if args.sim:
         hierarchical = True  # sim env is always hierarchical
     if args.checkpoint:
         obs_size = env.observation_space.shape[0]
-        if hierarchical:
+        if use_cnn:
+            bh = cfg.resolved_board_height
+            bw = cfg.resolved_board_width
+            agent, checkpoint, device = load_spatial_agent(
+                args.checkpoint, board_h=bh, board_w=bw
+            )
+        elif hierarchical:
             max_dest = getattr(cfg, "max_destinations", 125)
             agent, checkpoint, device = load_hierarchical_agent(
                 args.checkpoint, obs_size, max_dest

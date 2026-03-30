@@ -31,6 +31,42 @@ def dissipate_heat(unit: Unit) -> None:
     unit.heat = max(0, unit.heat - sinks)
 
 
+def attempt_startup(unit: Unit, rng: random.Random | None = None) -> dict | None:
+    """Attempt to restart a shut-down unit.
+
+    Matches Java HeatResolver.resolveHeat() lines 568-645.
+    Called after heat dissipation, before the shutdown check.
+
+    Returns an event dict on attempt (success or failure), or None if
+    the unit is not shut down or heat is too high to attempt.
+    """
+    if not unit.shutdown:
+        return None
+
+    # Heat >= 30: automatic shutdown threshold, cannot attempt startup
+    if unit.heat >= 30:
+        return None
+
+    name = f"{unit.template.chassis} {unit.template.model}"
+
+    # Heat < 14: automatic restart (no roll needed)
+    if unit.heat < 14:
+        unit.shutdown = False
+        return {"entity_id": unit.entity_id, "name": name,
+                "type": "startup", "auto": True, "heat": unit.heat}
+
+    # Roll for startup: TN = 4 + floor((heat - 14) / 4) * 2
+    r = rng or random
+    tn = 4 + (((unit.heat - 14) // 4) * 2)
+    roll = d6(2, r)
+    if roll >= tn:
+        unit.shutdown = False
+        return {"entity_id": unit.entity_id, "name": name,
+                "type": "startup", "roll": roll, "tn": tn, "heat": unit.heat}
+    return {"entity_id": unit.entity_id, "name": name,
+            "type": "startup_failed", "roll": roll, "tn": tn, "heat": unit.heat}
+
+
 def check_overheat(unit: Unit, rng: random.Random | None = None) -> dict:
     """Check for overheat effects: shutdown and ammo explosion.
 

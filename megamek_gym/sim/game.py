@@ -7,13 +7,25 @@ import random
 from megamek_gym.reward import hex_bearing, hex_distance
 from megamek_gym.sim.board import BOARD, Board, _NEIGHBOR_TABLE
 from megamek_gym.sim.firing import apply_damage, d6, resolve_firing, roll_hit_location
-from megamek_gym.sim.heat import apply_heat, check_overheat, dissipate_heat
+from megamek_gym.sim.heat import apply_heat, attempt_startup, check_overheat, dissipate_heat
 from megamek_gym.sim.los import LosTable
 from megamek_gym.sim.movement import (
     _ELEV_DIFF_TABLE, _MP_COST_TABLE, enumerate_moves,
 )
 from megamek_gym.sim.princess import select_move
 from megamek_gym.sim.unit import UNIT_TEMPLATES, Unit
+
+
+def _find_stand_still(moves: list[dict], unit: Unit) -> int:
+    """Find index of stand-still move (same position, same facing, 0 MP)."""
+    for i, m in enumerate(moves):
+        if (m["dest_x"] == unit.x and m["dest_y"] == unit.y
+                and m["facing"] == unit.facing and m["mp_used"] == 0):
+            return i
+    for i, m in enumerate(moves):
+        if m["dest_x"] == unit.x and m["dest_y"] == unit.y:
+            return i
+    return 0
 
 
 class Game:
@@ -131,10 +143,6 @@ class Game:
         else:
             action = max(0, min(action, len(rl_moves) - 1))
 
-        # Enumerate opponent moves
-        opp_moves = enumerate_moves(self.opp_unit, self.board, self.rl_unit,
-                                    algorithm=self.move_algorithm)
-
         # Move order based on initiative — capture movement info
         # Pass enemy position for greedy-walk blocking after PSR falls
         if self.rl_moves_first:
@@ -144,11 +152,20 @@ class Game:
             if self._check_game_end():
                 self._append_round_log(rl_move_info, None, {}, {})
                 return self._build_terminal_observation()
+            # Re-enumerate opponent moves with RL's updated position to
+            # prevent stacking violations (RL may have moved to a new hex)
+            opp_moves = enumerate_moves(self.opp_unit, self.board,
+                                        self.rl_unit,
+                                        algorithm=self.move_algorithm)
             opp_action = self._select_opponent_move(opp_moves)
             rl_xy = (self.rl_unit.x, self.rl_unit.y)
             opp_move_info = self._execute_move(self.opp_unit, opp_moves, opp_action,
                                                enemy_xy=rl_xy)
         else:
+            # Enumerate opponent moves (RL hasn't moved yet, position is current)
+            opp_moves = enumerate_moves(self.opp_unit, self.board,
+                                        self.rl_unit,
+                                        algorithm=self.move_algorithm)
             opp_action = self._select_opponent_move(opp_moves)
             rl_xy = (self.rl_unit.x, self.rl_unit.y)
             opp_move_info = self._execute_move(self.opp_unit, opp_moves, opp_action,
@@ -156,7 +173,14 @@ class Game:
             if self._check_game_end():
                 self._append_round_log(None, opp_move_info, {}, {})
                 return self._build_terminal_observation()
+            # Validate RL's chosen move doesn't violate stacking (opponent
+            # may have moved to the hex RL wants to reach)
             opp_xy = (self.opp_unit.x, self.opp_unit.y)
+            if rl_moves and action >= 0:
+                chosen = rl_moves[action]
+                if (chosen["dest_x"] == opp_xy[0]
+                        and chosen["dest_y"] == opp_xy[1]):
+                    action = _find_stand_still(rl_moves, self.rl_unit)
             rl_move_info = self._execute_move(self.rl_unit, rl_moves, action,
                                               enemy_xy=opp_xy)
 
@@ -178,14 +202,16 @@ class Game:
             return self._build_terminal_observation()
 
         # Heat phase
-        self._resolve_heat()
+        heat_events = self._resolve_heat()
 
         if self._check_game_end():
-            self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing)
+            self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing,
+                                   heat_events)
             return self._build_terminal_observation()
 
         # Log this round's events before advancing
-        self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing)
+        self._append_round_log(rl_move_info, opp_move_info, rl_firing, opp_firing,
+                               heat_events)
 
         # End of round
         self.rl_unit.clear_turn_state()
@@ -206,8 +232,9 @@ class Game:
         opp_move_info: dict | None,
         rl_firing: dict,
         opp_firing: dict,
+        heat_events: list[dict] | None = None,
     ) -> None:
-        self.round_log.append({
+        entry = {
             "round": self.round,
             "initiative": dict(self._last_initiative),
             "rl_moves_first": self.rl_moves_first,
@@ -216,7 +243,10 @@ class Game:
             "rl_firing": rl_firing,
             "opp_firing": opp_firing,
             "unit_states": [self.rl_unit.to_obs_dict(), self.opp_unit.to_obs_dict()],
-        })
+        }
+        if heat_events:
+            entry["heat_events"] = heat_events
+        self.round_log.append(entry)
 
     def _roll_initiative(self) -> None:
         while True:
@@ -582,13 +612,39 @@ class Game:
 
         return rl_result, opp_result
 
-    def _resolve_heat(self) -> None:
+    def _resolve_heat(self) -> list[dict]:
+        events = []
         for unit in (self.rl_unit, self.opp_unit):
             dissipate_heat(unit)
-            if unit.heat >= 14:
+
+            # Startup attempt (Java HeatResolver lines 568-645):
+            # after dissipation, before shutdown check
+            startup_event = attempt_startup(unit, self.rng)
+            started_up = False
+            if startup_event is not None:
+                events.append(startup_event)
+                started_up = startup_event["type"] == "startup"
+
+            # Shutdown check — skip if unit just restarted this phase
+            # (Java line 650: !entity.isStartupThisPhase())
+            if not started_up and unit.heat >= 14:
                 effects = check_overheat(unit, self.rng)
                 if effects.get("ammo_explosion"):
                     unit.destroyed = True
+                    events.append({
+                        "entity_id": unit.entity_id,
+                        "name": f"{unit.template.chassis} {unit.template.model}",
+                        "type": "ammo_explosion",
+                        "heat": unit.heat,
+                    })
+                elif effects.get("shutdown"):
+                    events.append({
+                        "entity_id": unit.entity_id,
+                        "name": f"{unit.template.chassis} {unit.template.model}",
+                        "type": "shutdown",
+                        "heat": unit.heat,
+                    })
+        return events
 
     def _check_game_end(self) -> bool:
         rl_dead = self.rl_unit.destroyed
