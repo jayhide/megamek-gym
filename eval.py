@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import gymnasium as gym
 
-from megamek_gym.agent import Agent, HierarchicalAgent, load_agent, load_config_from_checkpoint, load_hierarchical_agent, select_action, OUTCOME_MAP
+from megamek_gym.agent import Agent, HierarchicalAgent, SpatialHierarchicalAgent, load_agent, load_config_from_checkpoint, load_hierarchical_agent, load_spatial_agent, select_action, OUTCOME_MAP
 from megamek_gym.config import MegaMekConfig
 
 
@@ -34,8 +34,8 @@ def parse_args():
     return args
 
 
-def _select_hierarchical(agent, obs, action_mask, device, deterministic, is_random):
-    """Select a (dest, facing) action for hierarchical action space.
+def _select_twostage(agent, obs, action_mask, device, deterministic, is_random):
+    """Select a (dest, facing) action for hierarchical or spatial action space.
 
     Returns a numpy array [dest_idx, facing].
     """
@@ -55,28 +55,57 @@ def _select_hierarchical(agent, obs, action_mask, device, deterministic, is_rand
 
     with torch.no_grad():
         if deterministic:
-            from megamek_gym.observation import DEST_FEATURES
-
-            features = agent.feature_net(obs_t)
-            dest_logits = agent.dest_head(features)
-            dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
-            dest = dest_logits.argmax(dim=1)
-
-            # Gather dest features from obs for facing head
-            off = agent.dest_block_offset
-            dest_start = off + dest * DEST_FEATURES
-            idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES, device=obs_t.device)
-            dest_feats = obs_t.gather(1, idx)
-            facing_input = torch.cat([features, dest_feats], dim=-1)
-            facing_logits = agent.facing_head(facing_input)
-            batch_fm = fm_t[torch.arange(1), dest]
-            facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
-            facing = facing_logits.argmax(dim=1)
-
-            return np.array([dest.item(), facing.item()])
+            if isinstance(agent, SpatialHierarchicalAgent):
+                return _select_spatial_deterministic(agent, obs_t, dm_t, fm_t)
+            else:
+                return _select_hierarchical_deterministic(agent, obs_t, dm_t, fm_t)
         else:
             action, _, _, _ = agent.get_action_and_value(obs_t, dm_t, fm_t)
             return action[0].cpu().numpy()
+
+
+def _select_spatial_deterministic(agent, obs_t, dm_t, fm_t):
+    """Greedy action selection for SpatialHierarchicalAgent."""
+    base, board = agent._split_obs(obs_t)
+    hex_features = agent.spatial_encoder(board)
+
+    dest_logits = agent.dest_head(hex_features).view(-1, agent.n_hexes)
+    dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
+    dest = dest_logits.argmax(dim=1)
+
+    hex_y = dest // agent.board_w
+    hex_x = dest % agent.board_w
+    selected_hex_feats = hex_features[0, :, hex_y, hex_x].view(1, -1)
+
+    facing_input = torch.cat([selected_hex_feats, base], dim=-1)
+    facing_logits = agent.facing_head(facing_input)
+    batch_fm = fm_t[torch.arange(1), dest]
+    facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
+    facing = facing_logits.argmax(dim=1)
+
+    return np.array([dest.item(), facing.item()])
+
+
+def _select_hierarchical_deterministic(agent, obs_t, dm_t, fm_t):
+    """Greedy action selection for HierarchicalAgent."""
+    from megamek_gym.observation import DEST_FEATURES
+
+    features = agent.feature_net(obs_t)
+    dest_logits = agent.dest_head(features)
+    dest_logits = dest_logits.masked_fill(~dm_t, -1e8)
+    dest = dest_logits.argmax(dim=1)
+
+    off = agent.dest_block_offset
+    dest_start = off + dest * DEST_FEATURES
+    idx = dest_start.unsqueeze(1) + torch.arange(DEST_FEATURES, device=obs_t.device)
+    dest_feats = obs_t.gather(1, idx)
+    facing_input = torch.cat([features, dest_feats], dim=-1)
+    facing_logits = agent.facing_head(facing_input)
+    batch_fm = fm_t[torch.arange(1), dest]
+    facing_logits = facing_logits.masked_fill(~batch_fm, -1e8)
+    facing = facing_logits.argmax(dim=1)
+
+    return np.array([dest.item(), facing.item()])
 
 
 if __name__ == "__main__":
@@ -102,17 +131,25 @@ if __name__ == "__main__":
     cfg.megamek_dir = args.megamek_dir
     cfg.rl_port = args.port
     cfg.env_index = 0
-    env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
+
+    if cfg.backend == "sim":
+        from megamek_gym.sim.env import MegaMekSimEnv
+        env = MegaMekSimEnv(config=cfg)
+    else:
+        env = gym.make("MegaMekGym/MegaMek-v0", config=cfg)
 
     obs_size = env.observation_space.shape[0]
-    hierarchical = cfg.action_space_type == "hierarchical"
+    spatial = cfg.use_cnn
+    hierarchical = cfg.action_space_type == "hierarchical" and not spatial
 
     if args.random:
         agent = None
         print(f"Random baseline (uniform over legal moves)")
         print(f"  num_episodes={args.num_episodes}")
     else:
-        if hierarchical:
+        if spatial:
+            agent, checkpoint, device = load_spatial_agent(args.checkpoint, device=device)
+        elif hierarchical:
             agent, checkpoint, device = load_hierarchical_agent(
                 args.checkpoint, obs_size, cfg.max_destinations, device)
         else:
@@ -120,7 +157,7 @@ if __name__ == "__main__":
                 args.checkpoint, obs_size, env.action_space.n, device)
         print(f"Loaded checkpoint: {args.checkpoint}")
         print(f"  global_step={checkpoint.get('global_step', '?')}, update={checkpoint.get('update', '?')}")
-        print(f"  obs_size={obs_size}, hierarchical={hierarchical}")
+        print(f"  obs_size={obs_size}, hierarchical={hierarchical}, spatial={spatial}")
         print(f"  deterministic={args.deterministic}, num_episodes={args.num_episodes}")
     print()
 
@@ -136,8 +173,8 @@ if __name__ == "__main__":
         episode_length = 0
 
         while not done:
-            if hierarchical:
-                action = _select_hierarchical(
+            if spatial or hierarchical:
+                action = _select_twostage(
                     agent, obs, info["action_mask"], device,
                     args.deterministic, args.random,
                 )

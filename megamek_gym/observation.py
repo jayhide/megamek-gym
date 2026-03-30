@@ -32,6 +32,13 @@ MOVE_FEATURE_NAMES = [
 MOVE_FEATURES = len(MOVE_FEATURE_NAMES)
 OBS_SIZE = BOARD_SIZE + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES  # 121 (without move features)
 
+# Multi-channel CNN board encoding (14 channels over H×W grid)
+# Static terrain: elevation, woods
+# Dynamic unit: self_location, enemy_location, self_facing, enemy_facing
+# Per-destination: reachable, mp_used, dist_to_enemy, elev_advantage, has_los,
+#                  enemy_rq, best_rl_rq, terrain_cover
+BOARD_CHANNELS = 14
+
 
 def _board_block_size(board_width: int, board_height: int) -> int:
     """Size of the board elevation block (0 when INCLUDE_BOARD_ELEVATION is False)."""
@@ -47,13 +54,20 @@ def compute_obs_size(board_width: int, board_height: int, max_legal_moves: int =
     return _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES + max_legal_moves * MOVE_FEATURES
 
 
-def compute_obs_size_hierarchical(board_width: int, board_height: int, max_destinations: int) -> int:
+def compute_obs_size_hierarchical(
+    board_width: int, board_height: int, max_destinations: int,
+    include_board_channels: bool = False,
+) -> int:
     """Compute observation vector size for hierarchical (dest + facing) action space.
 
-    Layout: [board elevations] + 2 units + global + dest features + facing features.
+    Layout: [board elevations] + 2 units + global + tactical + dest features + facing features
+            [+ board_channels if CNN enabled]
     """
     base = _board_block_size(board_width, board_height) + 2 * UNIT_FEATURES + GLOBAL_FEATURES + TACTICAL_FEATURES
-    return base + max_destinations * DEST_FEATURES + max_destinations * 6 * FACING_FEATURES
+    size = base + max_destinations * DEST_FEATURES + max_destinations * 6 * FACING_FEATURES
+    if include_board_channels:
+        size += BOARD_CHANNELS * board_height * board_width
+    return size
 
 MAX_ARMOR_LOCATIONS = 8
 MAX_WEAPONS = 7
@@ -151,13 +165,18 @@ def flatten_observation_hierarchical(
     board_height: int = BOARD_HEIGHT,
     legal_moves: list | None = None,
     max_destinations: int = 100,
+    include_board_channels: bool = False,
 ) -> np.ndarray:
     """Flatten observation for hierarchical (dest + facing) action space.
 
-    Layout: [board elevations] | RL unit | enemy unit | global |
+    Layout: [board elevations] | RL unit | enemy unit | global | tactical |
             per-dest features (max_dest * 9) | per-dest facing features (max_dest * 6 * 1)
+            [| board channels (BOARD_CHANNELS * H * W) if CNN enabled]
     """
-    obs_size = compute_obs_size_hierarchical(board_width, board_height, max_destinations)
+    obs_size = compute_obs_size_hierarchical(
+        board_width, board_height, max_destinations,
+        include_board_channels=include_board_channels,
+    )
     result = np.zeros(obs_size, dtype=np.float32)
 
     board = obs.get("board", {})
@@ -226,7 +245,148 @@ def flatten_observation_hierarchical(
             walk_mp=walk_mp, rl_unit=rl_unit, enemy_unit=enemy_unit, board_hexes=board_hexes,
         )
 
+    # Multi-channel CNN board encoding (appended at end)
+    if include_board_channels:
+        board_offset = obs_size - BOARD_CHANNELS * board_height * board_width
+        walk_mp_cnn = rl_unit.get("mp_walk", 0) if rl_unit else 0
+        _encode_board_channels(
+            result, board_offset, board_hexes, board_width, board_height,
+            rl_unit=rl_unit, enemy_unit=enemy_unit, legal_moves=legal_moves,
+            walk_mp=walk_mp_cnn,
+        )
+
     return result
+
+
+def compute_obs_size_spatial(board_width: int, board_height: int) -> int:
+    """Compute observation vector size for spatial CNN agent.
+
+    Layout: [base features (OBS_SIZE)] + [board channels (BOARD_CHANNELS * H * W)]
+    No per-dest/facing scalar blocks — those are encoded as board channels.
+    """
+    return OBS_SIZE + BOARD_CHANNELS * board_height * board_width
+
+
+def flatten_observation_spatial(
+    obs: dict,
+    rl_owner_id: int,
+    board_width: int = BOARD_WIDTH,
+    board_height: int = BOARD_HEIGHT,
+    legal_moves: list | None = None,
+) -> np.ndarray:
+    """Flatten observation for spatial CNN agent.
+
+    Layout: [base features (OBS_SIZE)] | [board channels (BOARD_CHANNELS * H * W)]
+    """
+    if legal_moves is None:
+        legal_moves = obs.get("legal_moves", [])
+
+    obs_size = compute_obs_size_spatial(board_width, board_height)
+    result = np.zeros(obs_size, dtype=np.float32)
+
+    board = obs.get("board", {})
+    board_hexes = board.get("hexes", [])
+
+    elev_map: dict[tuple[int, int], float] = {}
+    for h in board_hexes:
+        elev_map[(h["x"], h["y"])] = h.get("elevation", 0)
+
+    # Board elevation block (disabled, kept for OBS_SIZE offset compatibility)
+    if INCLUDE_BOARD_ELEVATION:
+        for h in board_hexes:
+            x, y = h["x"], h["y"]
+            if 0 <= x < board_width and 0 <= y < board_height:
+                idx = y * board_width + x
+                result[idx] = h.get("elevation", 0) / 10.0
+
+    # Split units
+    units = obs.get("units", [])
+    rl_unit = None
+    enemy_unit = None
+    for u in units:
+        if u["owner"] == rl_owner_id:
+            rl_unit = u
+        else:
+            enemy_unit = u
+
+    # Encode units (same as flat/hierarchical)
+    offset = _board_block_size(board_width, board_height)
+    if rl_unit is not None:
+        _encode_unit(result, offset, rl_unit, board_width, board_height,
+                     board_hexes=board_hexes, elev_map=elev_map)
+    offset += UNIT_FEATURES
+    if enemy_unit is not None:
+        _encode_unit(result, offset, enemy_unit, board_width, board_height,
+                     board_hexes=board_hexes, elev_map=elev_map)
+    offset += UNIT_FEATURES
+
+    # Global features
+    result[offset] = float(obs.get("rl_moves_first", False))
+    offset += GLOBAL_FEATURES
+
+    # Tactical features
+    has_los_current = obs.get("has_los_current")
+    if has_los_current is None and legal_moves and rl_unit and rl_unit.get("x", -1) >= 0:
+        rl_x, rl_y = rl_unit["x"], rl_unit["y"]
+        for m in legal_moves:
+            if m.get("dest_x") == rl_x and m.get("dest_y") == rl_y:
+                has_los_current = m.get("has_los", False)
+                break
+    _encode_tactical_features(
+        result, offset,
+        rl_unit=rl_unit, enemy_unit=enemy_unit,
+        elev_map=elev_map, board_width=board_width, board_height=board_height,
+        game_round=obs.get("round", 0),
+        has_los_current=bool(has_los_current) if has_los_current is not None else False,
+    )
+    offset += TACTICAL_FEATURES
+
+    # Board channels (14 channels × H × W)
+    board_offset = OBS_SIZE
+    walk_mp = rl_unit.get("mp_walk", 0) if rl_unit else 0
+    _encode_board_channels(
+        result, board_offset, board_hexes, board_width, board_height,
+        rl_unit=rl_unit, enemy_unit=enemy_unit, legal_moves=legal_moves,
+        walk_mp=walk_mp,
+    )
+
+    return result
+
+
+def compute_spatial_masks(
+    legal_moves: list,
+    walk_mp: int,
+    board_width: int = BOARD_WIDTH,
+    board_height: int = BOARD_HEIGHT,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute action masks for spatial CNN agent.
+
+    Returns:
+        dest_mask: (H*W,) bool — True at each reachable hex
+        facing_mask: (H*W, 6) bool — True at each valid (hex, facing) combo
+    """
+    n_hexes = board_height * board_width
+    dest_mask = np.zeros(n_hexes, dtype=bool)
+    facing_mask = np.zeros((n_hexes, 6), dtype=bool)
+
+    # Group by (x, y) — collapse walk/run to same hex, take walk if available
+    hex_facings: dict[tuple[int, int], set[int]] = {}
+    for m in legal_moves:
+        dx, dy = m.get("dest_x", -1), m.get("dest_y", -1)
+        if 0 <= dx < board_width and 0 <= dy < board_height:
+            key = (dx, dy)
+            if key not in hex_facings:
+                hex_facings[key] = set()
+            hex_facings[key].add(m.get("facing", 0))
+
+    for (hx, hy), facings in hex_facings.items():
+        flat_idx = hy * board_width + hx
+        dest_mask[flat_idx] = True
+        for f in facings:
+            if 0 <= f < 6:
+                facing_mask[flat_idx, f] = True
+
+    return dest_mask, facing_mask
 
 
 def _flatten_dest_features(
@@ -324,6 +484,166 @@ def _flatten_dest_features(
 
         # Best RL range quality across all available facings
         buf[base + 8] = _norm_rq(best_rl_rq)
+
+
+# ---------------------------------------------------------------------------
+# Hex neighbor offsets for facing channel (odd-column offset coordinates)
+# ---------------------------------------------------------------------------
+_EVEN_COL_DIRS = [(0, -1), (1, -1), (1, 0), (0, 1), (-1, 0), (-1, -1)]  # N NE SE S SW NW
+_ODD_COL_DIRS = [(0, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)]
+
+
+def _hex_neighbor(x: int, y: int, direction: int) -> tuple[int, int]:
+    """Return neighbor hex coords for the given direction (0=N .. 5=NW)."""
+    offsets = _ODD_COL_DIRS if x % 2 == 1 else _EVEN_COL_DIRS
+    dx, dy = offsets[direction]
+    return x + dx, y + dy
+
+
+def _encode_board_channels(
+    buf: np.ndarray,
+    offset: int,
+    board_hexes: list,
+    board_width: int,
+    board_height: int,
+    rl_unit: dict | None = None,
+    enemy_unit: dict | None = None,
+    legal_moves: list | None = None,
+    walk_mp: int = 0,
+) -> None:
+    """Write BOARD_CHANNELS * H * W floats into buf[offset:].
+
+    Channel layout (channel-major, row-major within each channel):
+      buf[offset + c * H * W + y * W + x]
+
+    Static terrain channels:
+      0: elevation / 3.0
+      1: woods cover (Light=0.5, Heavy=1.0)
+    Dynamic unit channels:
+      2: self (RL unit) location (1.0 at unit hex)
+      3: enemy location (1.0 at unit hex)
+      4: self facing (1.0 at unit hex, 0.5 at front-arc neighbors)
+      5: enemy facing (1.0 at unit hex, 0.5 at front-arc neighbors)
+    Per-destination channels (nonzero only at reachable hexes):
+      6: reachable mask
+      7: mp_used / 20.0
+      8: distance to enemy / (W+H)
+      9: elevation advantage (dest_elev - enemy_elev) / 10
+      10: has LOS to enemy
+      11: enemy range quality (normalized)
+      12: best RL range quality across facings (normalized)
+      13: terrain cover / 2.0
+    """
+    hw = board_height * board_width
+
+    # Channels 0-2: terrain (from board_hexes list)
+    elev_map: dict[tuple[int, int], float] = {}
+    for h in board_hexes:
+        hx, hy = h.get("x", -1), h.get("y", -1)
+        if 0 <= hx < board_width and 0 <= hy < board_height:
+            idx = hy * board_width + hx
+            elev = h.get("elevation", 0)
+            elev_map[(hx, hy)] = elev
+            buf[offset + idx] = elev / 3.0
+            terrain = h.get("terrain", "")
+            if "Heavy Woods" in terrain:
+                buf[offset + hw + idx] = 1.0
+            elif "Light Woods" in terrain:
+                buf[offset + hw + idx] = 0.5
+
+    # Ch 2: self location
+    if rl_unit is not None:
+        rx, ry = rl_unit.get("x", -1), rl_unit.get("y", -1)
+        if 0 <= rx < board_width and 0 <= ry < board_height:
+            buf[offset + 2 * hw + ry * board_width + rx] = 1.0
+
+            # Ch 4: self facing (1.0 at unit, 0.5 at front-arc neighbors)
+            buf[offset + 4 * hw + ry * board_width + rx] = 1.0
+            facing = rl_unit.get("facing", 0)
+            for d in [(facing - 1) % 6, facing, (facing + 1) % 6]:
+                nx, ny = _hex_neighbor(rx, ry, d)
+                if 0 <= nx < board_width and 0 <= ny < board_height:
+                    buf[offset + 4 * hw + ny * board_width + nx] = 0.5
+
+    # Ch 3: enemy location + Ch 5: enemy facing
+    has_enemy = (enemy_unit is not None
+                 and enemy_unit.get("x", -1) >= 0
+                 and enemy_unit.get("y", -1) >= 0)
+    if has_enemy:
+        ex, ey = enemy_unit["x"], enemy_unit["y"]
+        enemy_facing = enemy_unit.get("facing")
+        enemy_elev = elev_map.get((ex, ey), 0)
+        if 0 <= ex < board_width and 0 <= ey < board_height:
+            buf[offset + 3 * hw + ey * board_width + ex] = 1.0
+
+            # Ch 5: enemy facing (1.0 at unit, 0.5 at front-arc neighbors)
+            if enemy_facing is not None:
+                buf[offset + 5 * hw + ey * board_width + ex] = 1.0
+                for d in [(enemy_facing - 1) % 6, enemy_facing, (enemy_facing + 1) % 6]:
+                    nx, ny = _hex_neighbor(ex, ey, d)
+                    if 0 <= nx < board_width and 0 <= ny < board_height:
+                        buf[offset + 5 * hw + ny * board_width + nx] = 0.5
+    else:
+        ex = ey = enemy_facing = None
+        enemy_elev = 0
+
+    max_dim = board_width + board_height
+
+    # Channels 6-13: per-destination features (grouped by hex, walk preferred)
+    if legal_moves:
+        destinations, _ = _group_moves_by_destination(legal_moves, walk_mp)
+        # Collapse walk/run to same hex: prefer walk (lower mp_used)
+        hex_dests: dict[tuple[int, int], dict] = {}
+        for dest in destinations:
+            key = (dest["dest_x"], dest["dest_y"])
+            if key not in hex_dests or dest["mp_used"] < hex_dests[key]["mp_used"]:
+                hex_dests[key] = dest
+
+        for (dx, dy), dest in hex_dests.items():
+            if not (0 <= dx < board_width and 0 <= dy < board_height):
+                continue
+            idx = dy * board_width + dx
+
+            # Ch 6: reachable mask
+            buf[offset + 6 * hw + idx] = 1.0
+            # Ch 7: mp_used
+            buf[offset + 7 * hw + idx] = dest["mp_used"] / 20.0
+
+            if has_enemy:
+                dist = hex_distance(dx, dy, ex, ey)
+                # Ch 8: distance to enemy
+                buf[offset + 8 * hw + idx] = dist / max_dim
+                # Ch 9: elevation advantage
+                dest_elev = elev_map.get((dx, dy), 0)
+                buf[offset + 9 * hw + idx] = (dest_elev - enemy_elev) / 10.0
+                # Ch 10: has LOS
+                any_move_idx = next(iter(dest["facing_options"].values()))
+                buf[offset + 10 * hw + idx] = float(
+                    legal_moves[any_move_idx].get("has_los", False)
+                )
+                # Ch 11: enemy range quality
+                buf[offset + 11 * hw + idx] = _norm_rq(range_quality(
+                    enemy_unit, dist,
+                    target_x=dx, target_y=dy,
+                    unit_x=ex, unit_y=ey,
+                    unit_facing=enemy_facing,
+                ))
+                # Ch 12: best RL range quality across facings
+                best_rq = -0.5
+                for facing_val in dest["facing_options"]:
+                    rq = range_quality(
+                        rl_unit, dist,
+                        target_x=ex, target_y=ey,
+                        unit_x=dx, unit_y=dy,
+                        unit_facing=facing_val,
+                    ) if rl_unit else -0.5
+                    if rq > best_rq:
+                        best_rq = rq
+                buf[offset + 12 * hw + idx] = _norm_rq(best_rq)
+
+            # Ch 13: terrain cover
+            if board_hexes:
+                buf[offset + 13 * hw + idx] = cover_value(board_hexes, dx, dy) / 2.0
 
 
 def _flatten_move_features(

@@ -1,0 +1,9 @@
+runs:
+  - name: "cnn-baseline"
+    config: configs/cnn_baseline.yaml
+  - name: "cnn-low-lr"
+    config: configs/cnn_low_lr.yaml
+  - name: "cnn-low-ent"
+    config: configs/cnn_low_ent.yaml
+  - name: "cnn-long-horizon"
+    config: configs/cnn_long_horizon.yaml

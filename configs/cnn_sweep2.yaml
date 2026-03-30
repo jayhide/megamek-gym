@@ -1,0 +1,11 @@
+runs:
+  - name: "cnn-3m"
+    config: configs/cnn_3m.yaml
+  - name: "cnn-epochs8"
+    config: configs/cnn_epochs8.yaml
+  - name: "cnn-mb8"
+    config: configs/cnn_mb8.yaml
+  - name: "cnn-low-ent-3m"
+    config: configs/cnn_low_ent_3m.yaml
+  - name: "cnn-high-lr"
+    config: configs/cnn_high_lr.yaml

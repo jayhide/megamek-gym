@@ -1259,6 +1259,9 @@ def build_sim_transcript(round_log: list[dict], step_log: list[dict],
         if not rl_steps:
             rl_steps = _build_rl_steps(steps_by_round.get(game_round, []))
 
+        # Heat events (ammo explosion, shutdown)
+        heat_events = entry.get("heat_events", [])
+
         rd = {
             "display_round": game_round,
             "initiative": initiative,
@@ -1266,6 +1269,7 @@ def build_sim_transcript(round_log: list[dict], step_log: list[dict],
             "second_movement": second_movement,
             "combat": combat,
             "damage": damage,
+            "heat_events": heat_events,
             "unit_status": unit_status,
             "rl_steps": rl_steps,
         }

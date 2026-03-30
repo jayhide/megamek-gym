@@ -726,3 +726,31 @@ class TestFullGameWithFalls:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(_run_game_with_seed, seeds))
         assert len(results) == 20
+
+
+class TestStacking:
+    """Verify two mechs never share a hex after movement."""
+
+    def test_no_stacking_across_many_games(self):
+        """Run 50 random-action games and assert units never share a hex."""
+        violations = []
+        for seed in range(50):
+            g = Game(rng=random.Random(seed), move_algorithm="deque")
+            obs = g.reset(seed=seed)
+            for step_num in range(100):
+                if g.terminated or g.truncated:
+                    break
+                action = g.rng.randrange(max(1, len(g._cached_rl_moves)))
+                obs = g.step(action)
+                # Check after movement (both units deployed and alive)
+                if (not g.rl_unit.destroyed and not g.opp_unit.destroyed
+                        and g.rl_unit.deployed and g.opp_unit.deployed):
+                    if (g.rl_unit.x == g.opp_unit.x
+                            and g.rl_unit.y == g.opp_unit.y):
+                        violations.append(
+                            f"seed={seed} step={step_num} "
+                            f"hex=({g.rl_unit.x},{g.rl_unit.y})"
+                        )
+        assert violations == [], (
+            f"Stacking violations found:\n" + "\n".join(violations)
+        )

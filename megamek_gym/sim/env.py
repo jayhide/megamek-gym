@@ -16,7 +16,10 @@ from megamek_gym.observation import (
     DEST_FEATURES,
     FACING_FEATURES,
     flatten_observation_hierarchical,
+    flatten_observation_spatial,
     compute_obs_size_hierarchical,
+    compute_obs_size_spatial,
+    compute_spatial_masks,
     identify_rl_owner,
     _group_moves_by_destination,
 )
@@ -79,16 +82,23 @@ class MegaMekSimEnv(gymnasium.Env):
                 max_rounds=max_game_rounds,
             )
 
-        # Observation and action spaces (matching Java bridge env)
-        obs_size = compute_obs_size_hierarchical(
-            self.board_width, self.board_height, self.max_destinations
-        )
+        # Spatial CNN mode
+        self._use_cnn = config.use_cnn if config is not None else False
+
+        # Observation and action spaces
+        if self._use_cnn:
+            obs_size = compute_obs_size_spatial(self.board_width, self.board_height)
+            n_hexes = self.board_height * self.board_width
+            self.action_space = gymnasium.spaces.MultiDiscrete([n_hexes, 6])
+        else:
+            obs_size = compute_obs_size_hierarchical(
+                self.board_width, self.board_height, self.max_destinations
+            )
+            self.action_space = gymnasium.spaces.MultiDiscrete(
+                [self.max_destinations, 6]
+            )
         self.observation_space = gymnasium.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
-        )
-        # MultiDiscrete: [destination_index (0..max_dest-1), facing (0..5)]
-        self.action_space = gymnasium.spaces.MultiDiscrete(
-            [self.max_destinations, 6]
         )
 
         # Reward function
@@ -102,6 +112,8 @@ class MegaMekSimEnv(gymnasium.Env):
         self._n_legal_moves: int = 0
         self._destinations: list = []
         self._dest_lookup: dict = {}
+        # Spatial CNN state
+        self._hex_move_lookup: dict[tuple[int, int, int], int] = {}  # (x,y,facing)->move_idx
 
     @property
     def reward_fn(self) -> CompositeReward:
@@ -156,6 +168,9 @@ class MegaMekSimEnv(gymnasium.Env):
 
     def _resolve_action(self, dest_idx: int, facing_idx: int) -> int:
         """Map hierarchical (dest, facing) action to a flat move index."""
+        if self._use_cnn:
+            return self._resolve_action_spatial(dest_idx, facing_idx)
+
         if not self._destinations:
             return 0
 
@@ -177,10 +192,29 @@ class MegaMekSimEnv(gymnasium.Env):
 
         return 0
 
+    def _resolve_action_spatial(self, hex_idx: int, facing_idx: int) -> int:
+        """Map spatial (hex_index, facing) action to a flat move index."""
+        if not self._hex_move_lookup:
+            return 0
+        hx = hex_idx % self.board_width
+        hy = hex_idx // self.board_width
+        move_idx = self._hex_move_lookup.get((hx, hy, facing_idx))
+        if move_idx is not None:
+            return move_idx
+        # Facing not available — pick any available facing for this hex
+        for f in range(6):
+            move_idx = self._hex_move_lookup.get((hx, hy, f))
+            if move_idx is not None:
+                return move_idx
+        return 0
+
     def _flatten(self, obs_dict: dict) -> np.ndarray:
         """Flatten observation dict to fixed-size array."""
         legal_moves = obs_dict.get("legal_moves", [])
         self._n_legal_moves = len(legal_moves)
+
+        if self._use_cnn:
+            return self._flatten_spatial(obs_dict, legal_moves)
 
         # Cache destination grouping for _resolve_action and action_masks
         if legal_moves:
@@ -201,8 +235,35 @@ class MegaMekSimEnv(gymnasium.Env):
             max_destinations=self.max_destinations,
         )
 
+    def _flatten_spatial(self, obs_dict: dict, legal_moves: list) -> np.ndarray:
+        """Flatten for spatial CNN mode."""
+        # Build hex→move_index lookup, preferring walk over run for same (hex, facing)
+        self._hex_move_lookup = {}
+        walk_mp = self._game.rl_unit.walk_mp
+        for i, m in enumerate(legal_moves):
+            dx, dy, f = m.get("dest_x", -1), m.get("dest_y", -1), m.get("facing", 0)
+            is_run = m.get("mp_used", 0) > walk_mp
+            key = (dx, dy, f)
+            if key not in self._hex_move_lookup:
+                self._hex_move_lookup[key] = i
+            elif is_run:
+                pass  # keep existing walk entry
+            else:
+                self._hex_move_lookup[key] = i  # replace run with walk
+
+        return flatten_observation_spatial(
+            obs_dict,
+            self._rl_owner,
+            board_width=self.board_width,
+            board_height=self.board_height,
+            legal_moves=legal_moves,
+        )
+
     def action_masks(self) -> dict:
-        """Return action masks for hierarchical action space."""
+        """Return action masks for hierarchical/spatial action space."""
+        if self._use_cnn:
+            return self._action_masks_spatial()
+
         max_dest = self.max_destinations
         dest_mask = np.zeros(max_dest, dtype=bool)
         facing_mask = np.zeros((max_dest, 6), dtype=bool)
@@ -211,6 +272,19 @@ class MegaMekSimEnv(gymnasium.Env):
             dest_mask[i] = True
             for facing in self._destinations[i]["facing_options"]:
                 facing_mask[i, facing] = True
+        return {"dest_mask": dest_mask, "facing_mask": facing_mask}
+
+    def _action_masks_spatial(self) -> dict:
+        """Return spatial action masks indexed by hex position."""
+        n_hexes = self.board_height * self.board_width
+        dest_mask = np.zeros(n_hexes, dtype=bool)
+        facing_mask = np.zeros((n_hexes, 6), dtype=bool)
+        for (hx, hy, f) in self._hex_move_lookup:
+            if 0 <= hx < self.board_width and 0 <= hy < self.board_height:
+                flat_idx = hy * self.board_width + hx
+                dest_mask[flat_idx] = True
+                if 0 <= f < 6:
+                    facing_mask[flat_idx, f] = True
         return {"dest_mask": dest_mask, "facing_mask": facing_mask}
 
     def _build_info(self, obs_dict: dict) -> dict:
@@ -228,14 +302,19 @@ class MegaMekSimEnv(gymnasium.Env):
             outcome_str = obs_dict.get("game_outcome", "UNKNOWN")
             game_outcome = {"WIN": 1, "LOSS": -1, "DRAW": 0}.get(outcome_str, 0)
 
-        moves_truncated = max(0, len(self._destinations) - self.max_destinations)
+        if self._use_cnn:
+            n_dest = len({(x, y) for (x, y, _) in self._hex_move_lookup})
+            moves_truncated = 0  # spatial mode has no cap
+        else:
+            n_dest = len(self._destinations)
+            moves_truncated = max(0, n_dest - self.max_destinations)
 
         return {
             "action_mask": self.action_masks(),
             "round": game_round,
             "phase": obs_dict.get("phase", "MOVEMENT"),
             "n_legal_moves": self._n_legal_moves,
-            "n_destinations": len(self._destinations),
+            "n_destinations": n_dest,
             "moves_truncated": moves_truncated,
             "game_outcome": game_outcome,
             "game_rounds": game_round,

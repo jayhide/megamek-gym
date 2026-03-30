@@ -1,4 +1,5 @@
 import argparse
+from collections import deque
 import dataclasses
 from distutils.util import strtobool
 import logging
@@ -17,8 +18,8 @@ from torch.distributions import Categorical
 import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
-from megamek_gym.agent import Agent, HierarchicalAgent
-from megamek_gym.observation import OBS_SIZE
+from megamek_gym.agent import Agent, HierarchicalAgent, SpatialHierarchicalAgent
+from megamek_gym.observation import BOARD_CHANNELS, OBS_SIZE
 from megamek_gym.config import MegaMekConfig
 
 
@@ -198,11 +199,20 @@ if __name__ == "__main__":
 
     try:  # try/finally to guarantee envs.close() on any exception
 
-        hierarchical = cfg.action_space_type == "hierarchical"
+        hierarchical = cfg.action_space_type == "hierarchical" or cfg.use_cnn
         obs_size = envs.single_observation_space.shape[0]
 
-        critic_obs_size = OBS_SIZE
-        if hierarchical:
+        critic_obs_size = OBS_SIZE  # base features only for non-CNN critics
+        if cfg.use_cnn:
+            bw = cfg.resolved_board_width
+            bh = cfg.resolved_board_height
+            agent = SpatialHierarchicalAgent(
+                board_h=bh, board_w=bw,
+                cnn_channels=BOARD_CHANNELS,
+                hidden_size=cfg.hidden_size,
+            ).to(device)
+            critic_obs_size = None  # spatial agent handles its own critic input
+        elif hierarchical:
             agent = HierarchicalAgent(obs_size, cfg.max_destinations, hidden_size=cfg.hidden_size, critic_obs_size=critic_obs_size).to(device)
         else:
             agent = Agent(obs_size, envs.single_action_space.n, hidden_size=cfg.hidden_size, critic_obs_size=critic_obs_size).to(device)
@@ -240,8 +250,9 @@ if __name__ == "__main__":
 
         if hierarchical:
             actions_buf = torch.zeros((cfg.num_steps, cfg.num_envs, 2), dtype=torch.long).to(device)
-            dest_masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, cfg.max_destinations), dtype=torch.bool).to(device)
-            facing_masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, cfg.max_destinations, 6), dtype=torch.bool).to(device)
+            n_dest_slots = (bh * bw) if cfg.use_cnn else cfg.max_destinations
+            dest_masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, n_dest_slots), dtype=torch.bool).to(device)
+            facing_masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, n_dest_slots, 6), dtype=torch.bool).to(device)
         else:
             actions_buf = torch.zeros((cfg.num_steps, cfg.num_envs)).to(device)
             masks_buf = torch.zeros((cfg.num_steps, cfg.num_envs, envs.single_action_space.n), dtype=torch.bool).to(device)
@@ -281,7 +292,9 @@ if __name__ == "__main__":
         print(f"  PPO Training — {cfg.exp_name}")
         print(f"  Backend: {cfg.backend} | Device: {device} | Envs: {cfg.num_envs} | Stagger: {cfg.stagger_delay}s")
         n_params = sum(p.numel() for p in agent.parameters())
-        if hierarchical:
+        if cfg.use_cnn:
+            print(f"  Obs: {obs_size} (CNN: {BOARD_CHANNELS}ch) | Action: MultiDiscrete([{n_dest_slots}, 6]) | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
+        elif hierarchical:
             print(f"  Obs: {obs_size} (critic: {critic_obs_size}) | Action: MultiDiscrete([{cfg.max_destinations}, 6]) | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
         else:
             print(f"  Obs: {obs_size} (critic: {critic_obs_size}) | Actions: {envs.single_action_space.n} | Hidden: {cfg.hidden_size} | Params: {n_params:,}")
@@ -300,6 +313,7 @@ if __name__ == "__main__":
 
         recent_returns = []
         recent_wins, recent_losses, recent_draws, recent_rounds = [], [], [], []
+        rolling_outcomes = deque(maxlen=50)  # 1=win, 0=loss/draw for rolling win%
         recent_lengths = []
         if checkpoint is None:
             total_games, total_wins, total_losses, total_draws, total_crashes, total_early_terms = 0, 0, 0, 0, 0, 0
@@ -416,6 +430,12 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_length", ep_len, global_step)
                         writer.add_scalar("charts/game_outcome", outcome, global_step)
                         writer.add_scalar("charts/game_rounds", rounds, global_step)
+                        if not crashed:
+                            rolling_outcomes.append(1 if outcome == 1 else 0)
+                        if len(rolling_outcomes) >= 10:
+                            writer.add_scalar("charts/rolling_win_pct",
+                                              sum(rolling_outcomes) / len(rolling_outcomes) * 100,
+                                              global_step)
                         if total_games > 0:
                             writer.add_scalar("charts/win_rate", total_wins / total_games, global_step)
                         if crashed:
@@ -449,8 +469,8 @@ if __name__ == "__main__":
 
             if hierarchical:
                 b_actions = actions_buf.reshape(-1, 2)
-                b_dest_masks = dest_masks_buf.reshape(-1, cfg.max_destinations)
-                b_facing_masks = facing_masks_buf.reshape(-1, cfg.max_destinations, 6)
+                b_dest_masks = dest_masks_buf.reshape(-1, n_dest_slots)
+                b_facing_masks = facing_masks_buf.reshape(-1, n_dest_slots, 6)
             else:
                 b_actions = actions_buf.reshape(-1)
                 b_masks = masks_buf.reshape((-1, envs.single_action_space.n))

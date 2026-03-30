@@ -22,8 +22,10 @@ from megamek_gym.observation import (
     _group_moves_by_destination,
     compute_obs_size,
     compute_obs_size_hierarchical,
+    compute_obs_size_spatial,
     flatten_observation,
     flatten_observation_hierarchical,
+    flatten_observation_spatial,
     identify_rl_owner,
 )
 from megamek_gym.reward import CompositeReward, RewardFunction
@@ -52,8 +54,15 @@ class MegaMekEnv(gymnasium.Env):
         self.config = config
         self.reward_fn = reward_fn or CompositeReward()
         self._hierarchical = config.action_space_type == "hierarchical"
+        self._use_cnn = config.use_cnn
 
-        if self._hierarchical:
+        if self._use_cnn:
+            obs_size = compute_obs_size_spatial(
+                config.resolved_board_width, config.resolved_board_height,
+            )
+            n_hexes = config.resolved_board_height * config.resolved_board_width
+            self.action_space = spaces.MultiDiscrete([n_hexes, 6])
+        elif self._hierarchical:
             obs_size = compute_obs_size_hierarchical(
                 config.resolved_board_width, config.resolved_board_height,
                 config.max_destinations,
@@ -81,6 +90,7 @@ class MegaMekEnv(gymnasium.Env):
         self._legal_moves: list = []
         self._destinations: list = []
         self._dest_facing_to_move_index: dict = {}
+        self._hex_move_lookup: dict[tuple[int, int, int], int] = {}
         self._reset_timing: dict | None = None
         self._java_crashed: bool = False
         self._reset_count: int = 0
@@ -317,7 +327,20 @@ class MegaMekEnv(gymnasium.Env):
         if self._java_crashed:
             return self._handle_crash("Java already crashed, awaiting reset")
 
-        if self._hierarchical:
+        if self._use_cnn:
+            hex_idx, facing = int(action[0]), int(action[1])
+            bw = self.config.resolved_board_width
+            hx, hy = hex_idx % bw, hex_idx // bw
+            move_index = self._hex_move_lookup.get((hx, hy, facing))
+            if move_index is None:
+                # Try any facing for this hex
+                for f in range(6):
+                    move_index = self._hex_move_lookup.get((hx, hy, f))
+                    if move_index is not None:
+                        break
+                if move_index is None:
+                    move_index = 0
+        elif self._hierarchical:
             dest_idx, facing = int(action[0]), int(action[1])
             move_index = self._dest_facing_to_move_index.get((dest_idx, facing))
             if move_index is None:
@@ -464,9 +487,14 @@ class MegaMekEnv(gymnasium.Env):
                 game_outcome = -1
 
         n_legal = len(self._legal_moves)
-        if self._hierarchical:
-            moves_truncated = max(0, len(self._destinations) - self.config.max_destinations)
+        if self._use_cnn:
+            n_dest = len({(x, y) for (x, y, _) in self._hex_move_lookup})
+            moves_truncated = 0
+        elif self._hierarchical:
+            n_dest = len(self._destinations)
+            moves_truncated = max(0, n_dest - self.config.max_destinations)
         else:
+            n_dest = 0
             moves_truncated = max(0, n_legal - self.config.max_legal_moves)
 
         info = {
@@ -474,7 +502,7 @@ class MegaMekEnv(gymnasium.Env):
             "round": game_round,
             "phase": raw_obs.get("phase", ""),
             "n_legal_moves": n_legal,
-            "n_destinations": len(self._destinations) if self._hierarchical else 0,
+            "n_destinations": n_dest,
             "moves_truncated": moves_truncated,
             "game_outcome": game_outcome,
             "game_rounds": game_round,
@@ -485,9 +513,32 @@ class MegaMekEnv(gymnasium.Env):
         return info
 
     def _flatten_obs(self, raw_obs: dict) -> np.ndarray:
-        """Flatten observation using the appropriate mode (flat or hierarchical)."""
+        """Flatten observation using the appropriate mode (flat, hierarchical, or spatial)."""
         cfg = self.config
-        if self._hierarchical:
+        if self._use_cnn:
+            # Build hex→move_index lookup, preferring walk over run
+            self._hex_move_lookup = {}
+            rl_unit = None
+            for u in raw_obs.get("units", []):
+                if u.get("owner") == self._rl_owner_id:
+                    rl_unit = u
+                    break
+            walk_mp = rl_unit.get("mp_walk", 0) if rl_unit else 0
+            for i, m in enumerate(self._legal_moves):
+                dx, dy = m.get("dest_x", -1), m.get("dest_y", -1)
+                f = m.get("facing", 0)
+                is_run = m.get("mp_used", 0) > walk_mp
+                key = (dx, dy, f)
+                if key not in self._hex_move_lookup:
+                    self._hex_move_lookup[key] = i
+                elif not is_run:
+                    self._hex_move_lookup[key] = i  # prefer walk
+            return flatten_observation_spatial(
+                raw_obs, self._rl_owner_id,
+                cfg.resolved_board_width, cfg.resolved_board_height,
+                legal_moves=self._legal_moves,
+            )
+        elif self._hierarchical:
             # Update destination grouping from current legal moves
             rl_unit = None
             for u in raw_obs.get("units", []):
@@ -512,6 +563,8 @@ class MegaMekEnv(gymnasium.Env):
             )
 
     def action_masks(self):
+        if self._use_cnn:
+            return self._action_masks_spatial()
         if self._hierarchical:
             return self._action_masks_hierarchical()
         mask = np.zeros(self.config.max_legal_moves, dtype=bool)
@@ -519,6 +572,21 @@ class MegaMekEnv(gymnasium.Env):
         if n > 0:
             mask[:n] = True
         return mask
+
+    def _action_masks_spatial(self) -> dict:
+        """Return spatial action masks indexed by hex position."""
+        bw = self.config.resolved_board_width
+        bh = self.config.resolved_board_height
+        n_hexes = bh * bw
+        dest_mask = np.zeros(n_hexes, dtype=bool)
+        facing_mask = np.zeros((n_hexes, 6), dtype=bool)
+        for (hx, hy, f) in self._hex_move_lookup:
+            if 0 <= hx < bw and 0 <= hy < bh:
+                flat_idx = hy * bw + hx
+                dest_mask[flat_idx] = True
+                if 0 <= f < 6:
+                    facing_mask[flat_idx, f] = True
+        return {"dest_mask": dest_mask, "facing_mask": facing_mask}
 
     def _action_masks_hierarchical(self) -> dict:
         """Return dest_mask and facing_mask for hierarchical action space."""

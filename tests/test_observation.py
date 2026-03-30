@@ -961,3 +961,151 @@ class TestHierarchicalObservation:
             ]
             np.testing.assert_array_equal(gathered, direct,
                 err_msg=f"Gathered facing features for dest {dest_idx} don't match")
+
+
+class TestSpatialObservation:
+    """Tests for spatial CNN observation encoding."""
+
+    def test_obs_size(self):
+        from megamek_gym.observation import compute_obs_size_spatial, BOARD_CHANNELS
+        size = compute_obs_size_spatial(16, 17)
+        assert size == OBS_SIZE + BOARD_CHANNELS * 17 * 16
+
+    def test_output_shape(self):
+        from megamek_gym.observation import flatten_observation_spatial
+        obs = _make_obs()
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        from megamek_gym.observation import compute_obs_size_spatial
+        expected_size = compute_obs_size_spatial(16, 17)
+        assert flat.shape == (expected_size,)
+        assert flat.dtype == np.float32
+
+    def test_base_features_match_hierarchical(self):
+        """Base features (first OBS_SIZE elements) should be identical to hierarchical."""
+        from megamek_gym.observation import flatten_observation_spatial
+        obs = _make_obs()
+        spatial = flatten_observation_spatial(obs, rl_owner_id=0)
+        hier = flatten_observation_hierarchical(obs, rl_owner_id=0)
+        np.testing.assert_array_equal(
+            spatial[:OBS_SIZE], hier[:OBS_SIZE],
+            err_msg="Base features differ between spatial and hierarchical"
+        )
+
+    def test_board_channel_elevation(self):
+        from megamek_gym.observation import flatten_observation_spatial, BOARD_CHANNELS
+        hexes = [
+            {"x": 3, "y": 2, "elevation": 3, "terrain": ""},
+            {"x": 0, "y": 0, "elevation": 0, "terrain": ""},
+        ]
+        obs = _make_obs(hexes=hexes)
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        board = flat[OBS_SIZE:].reshape(BOARD_CHANNELS, 17, 16)
+        # Ch 0: elevation at (3, 2) should be 3/3.0 = 1.0
+        assert board[0, 2, 3] == pytest.approx(1.0)
+        # Ch 0: elevation at (0, 0) should be 0
+        assert board[0, 0, 0] == pytest.approx(0.0)
+
+    def test_board_channel_woods(self):
+        from megamek_gym.observation import flatten_observation_spatial, BOARD_CHANNELS
+        hexes = [
+            {"x": 1, "y": 1, "elevation": 0, "terrain": "Light Woods"},
+            {"x": 2, "y": 1, "elevation": 0, "terrain": "Heavy Woods"},
+            {"x": 3, "y": 1, "elevation": 0, "terrain": ""},
+        ]
+        obs = _make_obs(hexes=hexes)
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        board = flat[OBS_SIZE:].reshape(BOARD_CHANNELS, 17, 16)
+        assert board[1, 1, 1] == pytest.approx(0.5)   # Light
+        assert board[1, 1, 2] == pytest.approx(1.0)   # Heavy
+        assert board[1, 1, 3] == pytest.approx(0.0)   # Clear
+
+    def test_board_channel_unit_locations(self):
+        from megamek_gym.observation import flatten_observation_spatial, BOARD_CHANNELS
+        obs = _make_obs()
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        board = flat[OBS_SIZE:].reshape(BOARD_CHANNELS, 17, 16)
+        # RL unit at (5, 7) — ch 2
+        assert board[2, 7, 5] == pytest.approx(1.0)
+        assert board[2].sum() == pytest.approx(1.0)  # only one nonzero
+        # Enemy at (10, 12) — ch 3
+        assert board[3, 12, 10] == pytest.approx(1.0)
+        assert board[3].sum() == pytest.approx(1.0)
+
+    def test_board_channel_enemy_facing(self):
+        from megamek_gym.observation import flatten_observation_spatial, BOARD_CHANNELS, _hex_neighbor
+        obs = _make_obs()
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        board = flat[OBS_SIZE:].reshape(BOARD_CHANNELS, 17, 16)
+        # Enemy at (10, 12) facing 4 — ch 5 should have 1.0 at unit hex
+        assert board[5, 12, 10] == pytest.approx(1.0)
+        # 0.5 at front-arc neighbor hexes (facing dirs 3, 4, 5)
+        for d in [3, 4, 5]:
+            nx, ny = _hex_neighbor(10, 12, d)
+            if 0 <= nx < 16 and 0 <= ny < 17:
+                assert board[5, ny, nx] == pytest.approx(0.5), f"dir {d} neighbor ({nx},{ny})"
+
+    def test_board_channel_reachable(self):
+        from megamek_gym.observation import flatten_observation_spatial, BOARD_CHANNELS
+        obs = _make_obs()
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        board = flat[OBS_SIZE:].reshape(BOARD_CHANNELS, 17, 16)
+        # Two legal moves: (5,6) and (6,7)
+        assert board[6, 6, 5] == pytest.approx(1.0)
+        assert board[6, 7, 6] == pytest.approx(1.0)
+        assert board[6].sum() == pytest.approx(2.0)
+
+    def test_board_channel_mp_used(self):
+        from megamek_gym.observation import flatten_observation_spatial, BOARD_CHANNELS
+        obs = _make_obs()
+        flat = flatten_observation_spatial(obs, rl_owner_id=0)
+        board = flat[OBS_SIZE:].reshape(BOARD_CHANNELS, 17, 16)
+        # Move to (5,6) with mp_used=1
+        assert board[7, 6, 5] == pytest.approx(1.0 / 20.0)
+        # Move to (6,7) with mp_used=2
+        assert board[7, 7, 6] == pytest.approx(2.0 / 20.0)
+
+
+class TestSpatialMasks:
+    """Tests for spatial action masks."""
+
+    def test_mask_shapes(self):
+        from megamek_gym.observation import compute_spatial_masks
+        legal_moves = [
+            {"index": 0, "dest_x": 5, "dest_y": 6, "facing": 2, "mp_used": 1},
+            {"index": 1, "dest_x": 5, "dest_y": 6, "facing": 3, "mp_used": 1},
+            {"index": 2, "dest_x": 6, "dest_y": 7, "facing": 1, "mp_used": 2},
+        ]
+        dest_mask, facing_mask = compute_spatial_masks(legal_moves, walk_mp=6)
+        assert dest_mask.shape == (17 * 16,)
+        assert facing_mask.shape == (17 * 16, 6)
+
+    def test_mask_values(self):
+        from megamek_gym.observation import compute_spatial_masks
+        legal_moves = [
+            {"index": 0, "dest_x": 5, "dest_y": 6, "facing": 2, "mp_used": 1},
+            {"index": 1, "dest_x": 5, "dest_y": 6, "facing": 3, "mp_used": 1},
+            {"index": 2, "dest_x": 6, "dest_y": 7, "facing": 1, "mp_used": 2},
+        ]
+        dest_mask, facing_mask = compute_spatial_masks(legal_moves, walk_mp=6)
+
+        # Two unique hexes
+        assert dest_mask.sum() == 2
+        assert dest_mask[6 * 16 + 5]   # (5, 6)
+        assert dest_mask[7 * 16 + 6]   # (6, 7)
+
+        # Facings for (5, 6): 2 and 3
+        hex_56 = 6 * 16 + 5
+        assert facing_mask[hex_56, 2]
+        assert facing_mask[hex_56, 3]
+        assert not facing_mask[hex_56, 0]
+
+        # Facings for (6, 7): 1 only
+        hex_67 = 7 * 16 + 6
+        assert facing_mask[hex_67, 1]
+        assert not facing_mask[hex_67, 0]
+
+    def test_empty_moves(self):
+        from megamek_gym.observation import compute_spatial_masks
+        dest_mask, facing_mask = compute_spatial_masks([], walk_mp=6)
+        assert dest_mask.sum() == 0
+        assert facing_mask.sum() == 0

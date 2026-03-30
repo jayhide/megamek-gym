@@ -1,0 +1,20 @@
+backend: sim
+rl_unit: Trebuchet TBT-5S
+opponent_unit: Trebuchet TBT-5S
+board: Map Set 6/16x17 Woodland
+rl_fixed_coords: [14, 1]
+opponent_fixed_coords: [1, 15]
+max_game_rounds: 40
+action_space_type: hierarchical
+use_cnn: true
+
+# Training
+exp_name: cnn-baseline
+num_envs: 38
+total_timesteps: 1000000
+num_steps: 128
+hidden_size: 512
+ent_coef: 0.05
+gamma: 0.9
+learning_rate: 0.0003
+save_interval: 25
